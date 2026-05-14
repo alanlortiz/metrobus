@@ -2,19 +2,18 @@ name: Monitor Metrobus CDMX
 
 on:
   schedule:
-    # 5:50 PM CDMX es 11:50 PM UTC (UTC-6)
     - cron: '50 23 * * *'
-  workflow_dispatch: # Esto permite que lo corras manualmente para probar
+  workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
     steps:
       - name: Descargar código
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4  # <-- Actualizado a v4
 
       - name: Configurar Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # <-- Actualizado a v5
         with:
           python-version: '3.9'
 
