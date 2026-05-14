@@ -1,6 +1,5 @@
 import os
 import logging
-import urllib.parse
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
@@ -54,7 +53,7 @@ class MetrobusMonitor:
                             afec_limpio = afec.lower().replace("estaciones afectadas", "").strip()
                             
                             if "servicio regular" not in est_limpio or "ninguna" not in afec_limpio:
-                                problemas.append(f"• {linea}: {est} | {afec}")
+                                problemas.append(f"- {linea}: {est} | {afec}")
             
             return "*Servicio Regular*" if not problemas else "*AFECTACIONES DETECTADAS:*\n" + "\n".join(problemas)
 
@@ -63,26 +62,32 @@ class MetrobusMonitor:
 
     def enviar_whatsapp(self, mensaje: str) -> None:
         if not MI_NUMERO or not API_KEY:
-            logging.error("ERROR CRÍTICO: Faltan las credenciales (MI_NUMERO o API_KEY) en los Secrets de GitHub.")
-            exit(1) # Esto forzará a que GitHub Actions marque una X roja
+            logging.error("ERROR CRITICO: Faltan las credenciales (MI_NUMERO o API_KEY) en los Secrets de GitHub.")
+            exit(1)
         
-        # Codificamos el número para que el signo '+' pase como '%2B'
-        telefono_codificado = urllib.parse.quote(MI_NUMERO)
-        msg_codificado = urllib.parse.quote(f"*REPORTE METROBÚS*\n\n{mensaje}")
-        url = f"https://api.callmebot.com/whatsapp.php?phone={telefono_codificado}&text={msg_codificado}&apikey={API_KEY}"
+        # 1. Usamos un diccionario para que requests maneje la codificacion de forma segura
+        parametros = {
+            "phone": MI_NUMERO.strip(),
+            "text": f"*REPORTE METROBUS*\n\n{mensaje}",
+            "apikey": API_KEY.strip()
+        }
         
-        # Agregamos la URL oculta para diagnóstico en los logs
-        url_segura = f"https://api.callmebot.com/whatsapp.php?phone={telefono_codificado}&text={msg_codificado}&apikey=OCULTA"
-        logging.info(f"URL de prueba armada por el script: {url_segura}")
+        # 2. Agregamos el User-Agent para engañar al firewall de CallMeBot (evitar el Error 403)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        url_base = "https://api.callmebot.com/whatsapp.php"
         
         try:
-            respuesta = requests.get(url, timeout=15)
+            # Mandamos la peticion usando params y headers
+            respuesta = requests.get(url_base, params=parametros, headers=headers, timeout=15)
             
             # CallMeBot devuelve 200 OK incluso si falla. Tenemos que leer su texto:
             texto_respuesta = respuesta.text.lower()
             if "error" in texto_respuesta or "invalid" in texto_respuesta:
-                logging.error(f"CallMeBot rechazó el mensaje. Respuesta del servidor:\n{respuesta.text}")
-                exit(1) # Forzamos el fallo para que te des cuenta
+                logging.error(f"CallMeBot rechazo el mensaje. Respuesta del servidor:\n{respuesta.text}")
+                exit(1) 
             else:
                 logging.info(f"WhatsApp enviado correctamente. Respuesta del servidor: {respuesta.text}")
                 
