@@ -2,59 +2,44 @@ import os
 import logging
 import urllib.parse
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 MI_NUMERO = os.getenv("MI_NUMERO")
 API_KEY = os.getenv("API_KEY")
-SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class MetrobusMonitor:
     def __init__(self, url: str):
         self.url = url
-        self.sesion = self._configurar_sesion_robusta()
-
-    def _configurar_sesion_robusta(self):
-        """Configura una sesión con reintentos automáticos para lidiar con errores 500 del proxy."""
-        sesion = requests.Session()
-        # Intentará 3 veces, esperando un poco más entre cada fallo (backoff_factor)
-        estrategia_reintento = Retry(
-            total=3,
-            backoff_factor=2, 
-            status_forcelist=[500, 502, 503, 504],
-            allowed_methods=["GET"]
-        )
-        adaptador = HTTPAdapter(max_retries=estrategia_reintento)
-        sesion.mount("http://", adaptador)
-        sesion.mount("https://", adaptador)
-        return sesion
 
     def obtener_estado_detallado(self) -> str:
-        if not SCRAPER_API_KEY:
-            return "❌ Error: Falta la clave de ScraperAPI."
-
+        problemas = []
         try:
-            parametros_proxy = {
-                'api_key': SCRAPER_API_KEY,
-                'url': self.url,
-                'country_code': 'mx',
-                'render': 'true'
-                # NOTA: 'premium': 'true' fue eliminado para evitar el Error 500 en cuentas estándar
-            }
-            
-            logging.info("Consultando el Metrobús a través de ScraperAPI...")
-            respuesta = self.sesion.get('http://api.scraperapi.com/', params=parametros_proxy, timeout=60)
-            respuesta.raise_for_status()
-            
-            soup = BeautifulSoup(respuesta.text, 'html.parser')
-            problemas = []
+            logging.info("Lanzando navegador headless con Playwright...")
+            with sync_playwright() as p:
+                # Lanzamos Chromium de forma invisible
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+                )
+                page = context.new_page()
+                
+                # Vamos a la página y esperamos hasta que la red esté inactiva (garantiza que el JS ya cargó la tabla)
+                logging.info("Navegando al portal del Metrobús y esperando renderizado...")
+                page.goto(self.url, wait_until="networkidle", timeout=60000)
+                
+                # Extraemos el HTML ya procesado
+                html = page.content()
+                browser.close()
+
+            logging.info("Analizando el DOM...")
+            soup = BeautifulSoup(html, 'html.parser')
             tablas = soup.find_all('table')
             
             if not tablas:
-                logging.warning("El proxy devolvió la página, pero no se encontraron tablas. El renderizado JS podría estar fallando.")
+                logging.warning("No se detectaron tablas en el HTML renderizado.")
 
             for tabla in tablas:
                 if 'estaciones afectadas' in tabla.text.lower():
@@ -72,23 +57,20 @@ class MetrobusMonitor:
                                 problemas.append(f"• {linea}: {est} | {afec}")
             
             return "✅ *Servicio Regular*" if not problemas else "⚠️ *AFECTACIONES DETECTADAS:*\n" + "\n".join(problemas)
-        
-        except requests.exceptions.RequestException as e:
-            return f"❌ Error de conexión tras varios intentos: {str(e)}"
+
         except Exception as e:
-            return f"❌ Error inesperado analizando la web: {str(e)}"
+            return f"❌ Error ejecutando Playwright: {str(e)}"
 
     def enviar_whatsapp(self, mensaje: str) -> None:
         if not MI_NUMERO or not API_KEY:
-            logging.error("Faltan credenciales de CallMeBot.")
+            logging.error("Faltan las credenciales de CallMeBot.")
             return
         
         msg_codificado = urllib.parse.quote(f"🚇 *REPORTE METROBÚS*\n\n{mensaje}")
         url = f"https://api.callmebot.com/whatsapp.php?phone={MI_NUMERO}&text={msg_codificado}&apikey={API_KEY}"
         
         try:
-            # También usamos la sesión robusta para asegurar el envío del mensaje
-            respuesta = self.sesion.get(url, timeout=15)
+            respuesta = requests.get(url, timeout=15)
             respuesta.raise_for_status()
             logging.info("WhatsApp enviado correctamente.")
         except requests.exceptions.RequestException as e:
