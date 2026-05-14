@@ -1,0 +1,28 @@
+name: Monitor Metrobus CDMX
+
+on:
+  schedule:
+    # 5:50 PM CDMX es 11:50 PM UTC (UTC-6)
+    - cron: '50 23 * * *'
+  workflow_dispatch: # Esto permite que lo corras manualmente para probar
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v3
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Instalar librerías
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar script
+        env:
+          MI_NUMERO: ${{ secrets.MI_NUMERO }}
+          API_KEY: ${{ secrets.API_KEY }}
+        run: python alerta_metrobus.py
