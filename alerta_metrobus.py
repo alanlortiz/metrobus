@@ -26,7 +26,7 @@ class MetrobusMonitor:
                 )
                 page = context.new_page()
                 
-                # Vamos a la página y esperamos hasta que la red esté inactiva (garantiza que el JS ya cargó la tabla)
+                # Vamos a la página y esperamos hasta que la red esté inactiva
                 logging.info("Navegando al portal del Metrobús y esperando renderizado...")
                 page.goto(self.url, wait_until="networkidle", timeout=60000)
                 
@@ -56,20 +56,24 @@ class MetrobusMonitor:
                             if "servicio regular" not in est_limpio or "ninguna" not in afec_limpio:
                                 problemas.append(f"• {linea}: {est} | {afec}")
             
-            return "✅ *Servicio Regular*" if not problemas else "⚠️ *AFECTACIONES DETECTADAS:*\n" + "\n".join(problemas)
+            return "*Servicio Regular*" if not problemas else "*AFECTACIONES DETECTADAS:*\n" + "\n".join(problemas)
 
         except Exception as e:
-            return f"❌ Error ejecutando Playwright: {str(e)}"
+            return f"Error ejecutando Playwright: {str(e)}"
 
     def enviar_whatsapp(self, mensaje: str) -> None:
         if not MI_NUMERO or not API_KEY:
-            logging.error("❌ ERROR CRÍTICO: Faltan las credenciales (MI_NUMERO o API_KEY) en los Secrets de GitHub.")
+            logging.error("ERROR CRÍTICO: Faltan las credenciales (MI_NUMERO o API_KEY) en los Secrets de GitHub.")
             exit(1) # Esto forzará a que GitHub Actions marque una X roja
         
         # Codificamos el número para que el signo '+' pase como '%2B'
         telefono_codificado = urllib.parse.quote(MI_NUMERO)
-        msg_codificado = urllib.parse.quote(f"🚇 *REPORTE METROBÚS*\n\n{mensaje}")
+        msg_codificado = urllib.parse.quote(f"*REPORTE METROBÚS*\n\n{mensaje}")
         url = f"https://api.callmebot.com/whatsapp.php?phone={telefono_codificado}&text={msg_codificado}&apikey={API_KEY}"
+        
+        # Agregamos la URL oculta para diagnóstico en los logs
+        url_segura = f"https://api.callmebot.com/whatsapp.php?phone={telefono_codificado}&text={msg_codificado}&apikey=OCULTA"
+        logging.info(f"URL de prueba armada por el script: {url_segura}")
         
         try:
             respuesta = requests.get(url, timeout=15)
@@ -77,13 +81,13 @@ class MetrobusMonitor:
             # CallMeBot devuelve 200 OK incluso si falla. Tenemos que leer su texto:
             texto_respuesta = respuesta.text.lower()
             if "error" in texto_respuesta or "invalid" in texto_respuesta:
-                logging.error(f"❌ CallMeBot rechazó el mensaje. Respuesta del servidor:\n{respuesta.text}")
+                logging.error(f"CallMeBot rechazó el mensaje. Respuesta del servidor:\n{respuesta.text}")
                 exit(1) # Forzamos el fallo para que te des cuenta
             else:
-                logging.info(f"✅ WhatsApp enviado correctamente. Respuesta del servidor: {respuesta.text}")
+                logging.info(f"WhatsApp enviado correctamente. Respuesta del servidor: {respuesta.text}")
                 
         except requests.exceptions.RequestException as e:
-            logging.error(f"❌ Fallo de red al conectar con CallMeBot: {str(e)}")
+            logging.error(f"Fallo de red al conectar con CallMeBot: {str(e)}")
             exit(1)
 
 if __name__ == "__main__":
