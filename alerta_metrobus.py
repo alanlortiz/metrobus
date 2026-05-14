@@ -2,6 +2,8 @@ import os
 import logging
 import urllib.parse
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
 MI_NUMERO = os.getenv("MI_NUMERO")
@@ -13,33 +15,48 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 class MetrobusMonitor:
     def __init__(self, url: str):
         self.url = url
+        self.sesion = self._configurar_sesion_robusta()
+
+    def _configurar_sesion_robusta(self):
+        """Configura una sesión con reintentos automáticos para lidiar con errores 500 del proxy."""
+        sesion = requests.Session()
+        # Intentará 3 veces, esperando un poco más entre cada fallo (backoff_factor)
+        estrategia_reintento = Retry(
+            total=3,
+            backoff_factor=2, 
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["GET"]
+        )
+        adaptador = HTTPAdapter(max_retries=estrategia_reintento)
+        sesion.mount("http://", adaptador)
+        sesion.mount("https://", adaptador)
+        return sesion
 
     def obtener_estado_detallado(self) -> str:
         if not SCRAPER_API_KEY:
-            return "Error: Falta la clave de ScraperAPI en los Secrets de GitHub."
+            return "❌ Error: Falta la clave de ScraperAPI."
 
         try:
             parametros_proxy = {
                 'api_key': SCRAPER_API_KEY,
                 'url': self.url,
-                'premium': 'true',
                 'country_code': 'mx',
-                'render': 'true'  # <-- CORRECCIÓN 1: Forzamos a ScraperAPI a ejecutar JavaScript
+                'render': 'true'
+                # NOTA: 'premium': 'true' fue eliminado para evitar el Error 500 en cuentas estándar
             }
             
-            respuesta = requests.get('http://api.scraperapi.com/', params=parametros_proxy, timeout=60)
+            logging.info("Consultando el Metrobús a través de ScraperAPI...")
+            respuesta = self.sesion.get('http://api.scraperapi.com/', params=parametros_proxy, timeout=60)
             respuesta.raise_for_status()
             
             soup = BeautifulSoup(respuesta.text, 'html.parser')
             problemas = []
             tablas = soup.find_all('table')
             
-            # Verificación de seguridad para los logs en GitHub Actions
             if not tablas:
-                logging.warning("No se detectaron tablas. La estructura del sitio pudo cambiar.")
+                logging.warning("El proxy devolvió la página, pero no se encontraron tablas. El renderizado JS podría estar fallando.")
 
             for tabla in tablas:
-                # CORRECCIÓN 2: Búsqueda robusta insensible a mayúsculas
                 if 'estaciones afectadas' in tabla.text.lower():
                     for fila in tabla.find_all('tr')[1:]:
                         celdas = fila.find_all('td')
@@ -48,34 +65,34 @@ class MetrobusMonitor:
                             est = celdas[1].get_text(strip=True)
                             afec = celdas[2].get_text(strip=True)
                             
-                            # CORRECCIÓN 3: Limpieza profunda antes de la validación lógica
                             est_limpio = est.lower().replace("estado", "").strip()
                             afec_limpio = afec.lower().replace("estaciones afectadas", "").strip()
                             
                             if "servicio regular" not in est_limpio or "ninguna" not in afec_limpio:
                                 problemas.append(f"• {linea}: {est} | {afec}")
             
-            return "*Servicio Regular*" if not problemas else " *AFECTACIONES DETECTADAS:*\n" + "\n".join(problemas)
+            return "✅ *Servicio Regular*" if not problemas else "⚠️ *AFECTACIONES DETECTADAS:*\n" + "\n".join(problemas)
         
         except requests.exceptions.RequestException as e:
-            return f"Error de conexión con el Metrobús: {str(e)}"
+            return f"❌ Error de conexión tras varios intentos: {str(e)}"
         except Exception as e:
-            return f"Error inesperado: {str(e)}"
+            return f"❌ Error inesperado analizando la web: {str(e)}"
 
     def enviar_whatsapp(self, mensaje: str) -> None:
         if not MI_NUMERO or not API_KEY:
-            logging.error("Faltan las credenciales de WhatsApp en los Secrets.")
+            logging.error("Faltan credenciales de CallMeBot.")
             return
         
         msg_codificado = urllib.parse.quote(f"🚇 *REPORTE METROBÚS*\n\n{mensaje}")
         url = f"https://api.callmebot.com/whatsapp.php?phone={MI_NUMERO}&text={msg_codificado}&apikey={API_KEY}"
         
         try:
-            respuesta = requests.get(url)
+            # También usamos la sesión robusta para asegurar el envío del mensaje
+            respuesta = self.sesion.get(url, timeout=15)
             respuesta.raise_for_status()
             logging.info("WhatsApp enviado correctamente.")
         except requests.exceptions.RequestException as e:
-            logging.error(f"Fallo al enviar el WhatsApp a través de CallMeBot: {str(e)}")
+            logging.error(f"Fallo al enviar el WhatsApp: {str(e)}")
 
 if __name__ == "__main__":
     monitor = MetrobusMonitor("https://www.metrobus.cdmx.gob.mx/ServicioMB")
