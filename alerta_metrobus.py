@@ -19,9 +19,14 @@ class MetrobusMonitor:
             return "Error: Falta la clave de ScraperAPI en los Secrets de GitHub."
 
         try:
-            proxy_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={self.url}"
+            parametros_proxy = {
+                'api_key': SCRAPER_API_KEY,
+                'url': self.url,
+                'premium': 'true',
+                'country_code': 'mx'
+            }
             
-            respuesta = requests.get(proxy_url, timeout=60)
+            respuesta = requests.get('http://api.scraperapi.com/', params=parametros_proxy, timeout=60)
             respuesta.raise_for_status()
             
             soup = BeautifulSoup(respuesta.text, 'html.parser')
@@ -40,12 +45,15 @@ class MetrobusMonitor:
                                 problemas.append(f"• {linea}: {est} | {afec}")
             
             return "*Servicio Regular*" if not problemas else " *AFECTACIONES:*\n" + "\n".join(problemas)
+        
+        except requests.exceptions.RequestException as e:
+            return f"Error de conexión con el Metrobús: {str(e)}"
         except Exception as e:
-            return f"Error al consultar la web del Metrobús a través del Proxy: {str(e)}"
+            return f"Error inesperado: {str(e)}"
 
     def enviar_whatsapp(self, mensaje: str) -> None:
         if not MI_NUMERO or not API_KEY:
-            logging.error("Faltan las credenciales en los Secrets.")
+            logging.error("Faltan las credenciales de WhatsApp en los Secrets.")
             return
         
         msg_codificado = urllib.parse.quote(f"🚇 *REPORTE METROBÚS*\n\n{mensaje}")
