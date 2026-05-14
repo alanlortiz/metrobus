@@ -6,22 +6,24 @@ from bs4 import BeautifulSoup
 
 MI_NUMERO = os.getenv("MI_NUMERO")
 API_KEY = os.getenv("API_KEY")
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class MetrobusMonitor:
     def __init__(self, url: str):
         self.url = url
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "es-MX,es;q=0.9,en-US;q=0.8,en;q=0.7",
-        }
 
     def obtener_estado_detallado(self) -> str:
+        if not SCRAPER_API_KEY:
+            return "Error: Falta la clave de ScraperAPI en los Secrets de GitHub."
+
         try:
-            # Aumentamos el tiempo de espera de 10 a 30 segundos
-            respuesta = requests.get(self.url, headers=self.headers, timeout=30)
+            proxy_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={self.url}"
+            
+            respuesta = requests.get(proxy_url, timeout=60)
             respuesta.raise_for_status()
+            
             soup = BeautifulSoup(respuesta.text, 'html.parser')
             problemas = []
             tablas = soup.find_all('table')
@@ -39,7 +41,7 @@ class MetrobusMonitor:
             
             return "*Servicio Regular*" if not problemas else " *AFECTACIONES:*\n" + "\n".join(problemas)
         except Exception as e:
-            return f"Error al consultar la web del Metrobús: {str(e)}"
+            return f"Error al consultar la web del Metrobús a través del Proxy: {str(e)}"
 
     def enviar_whatsapp(self, mensaje: str) -> None:
         if not MI_NUMERO or not API_KEY:
