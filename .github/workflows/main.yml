@@ -2,18 +2,21 @@ name: Monitor Metrobus CDMX
 
 on:
   schedule:
-    - cron: '50 23 * * *'
+    - cron: '45 23 * * *'
   workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
     steps:
       - name: Descargar código
-        uses: actions/checkout@v4  # <-- Actualizado a v4
+        uses: actions/checkout@v4
 
       - name: Configurar Python
-        uses: actions/setup-python@v5 # <-- Actualizado a v5
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
@@ -24,4 +27,5 @@ jobs:
         env:
           MI_NUMERO: ${{ secrets.MI_NUMERO }}
           API_KEY: ${{ secrets.API_KEY }}
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
         run: python alerta_metrobus.py
