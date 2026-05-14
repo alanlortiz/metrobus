@@ -63,18 +63,28 @@ class MetrobusMonitor:
 
     def enviar_whatsapp(self, mensaje: str) -> None:
         if not MI_NUMERO or not API_KEY:
-            logging.error("Faltan las credenciales de CallMeBot.")
-            return
+            logging.error("❌ ERROR CRÍTICO: Faltan las credenciales (MI_NUMERO o API_KEY) en los Secrets de GitHub.")
+            exit(1) # Esto forzará a que GitHub Actions marque una X roja
         
+        # Codificamos el número para que el signo '+' pase como '%2B'
+        telefono_codificado = urllib.parse.quote(MI_NUMERO)
         msg_codificado = urllib.parse.quote(f"🚇 *REPORTE METROBÚS*\n\n{mensaje}")
-        url = f"https://api.callmebot.com/whatsapp.php?phone={MI_NUMERO}&text={msg_codificado}&apikey={API_KEY}"
+        url = f"https://api.callmebot.com/whatsapp.php?phone={telefono_codificado}&text={msg_codificado}&apikey={API_KEY}"
         
         try:
             respuesta = requests.get(url, timeout=15)
-            respuesta.raise_for_status()
-            logging.info("WhatsApp enviado correctamente.")
+            
+            # CallMeBot devuelve 200 OK incluso si falla. Tenemos que leer su texto:
+            texto_respuesta = respuesta.text.lower()
+            if "error" in texto_respuesta or "invalid" in texto_respuesta:
+                logging.error(f"❌ CallMeBot rechazó el mensaje. Respuesta del servidor:\n{respuesta.text}")
+                exit(1) # Forzamos el fallo para que te des cuenta
+            else:
+                logging.info(f"✅ WhatsApp enviado correctamente. Respuesta del servidor: {respuesta.text}")
+                
         except requests.exceptions.RequestException as e:
-            logging.error(f"Fallo al enviar el WhatsApp: {str(e)}")
+            logging.error(f"❌ Fallo de red al conectar con CallMeBot: {str(e)}")
+            exit(1)
 
 if __name__ == "__main__":
     monitor = MetrobusMonitor("https://www.metrobus.cdmx.gob.mx/ServicioMB")
