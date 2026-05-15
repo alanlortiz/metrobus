@@ -22,7 +22,9 @@ jobs:
           python-version: '3.9'
 
       - name: Instalar librerías
-        run: pip install requests beautifulsoup4
+        run: |
+          pip install requests beautifulsoup4 playwright
+          playwright install chromium
 
       - name: Ejecutar script
         env:
