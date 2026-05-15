@@ -73,5 +73,7 @@ class MetrobusMonitor:
             exit(1)
 
 if __name__ == "__main__":
-    monitor = MetrobusMonitor("https://www.metrobus.cdmx.gob.mx/ServicioMB")
+    # Apuntamos directo al servidor interno de SEMOVI que alimenta el iframe
+    url_directa = "https://incidentesmovilidad.cdmx.gob.mx/public/bandejaEstadoServicio.xhtml?idMedioTransporte=mb"
+    monitor = MetrobusMonitor(url_directa)
     monitor.enviar_telegram(monitor.obtener_estado_detallado())
