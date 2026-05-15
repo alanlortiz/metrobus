@@ -32,15 +32,14 @@ class MetrobusMonitor:
         ]
 
         try:
-            logging.info("Consultando la página a través de ScraperAPI...")
+            logging.info("Consultando la página a través de ScraperAPI (Modo ligero)...")
             parametros_proxy = {
                 'api_key': SCRAPER_API_KEY,
                 'url': self.url,
-                'country_code': 'mx',
-                'render': 'true' # Forzamos el renderizado JS para que cargue la tabla
+                'country_code': 'mx'
+                # Eliminamos 'render': 'true' para evitar que los servidores de ScraperAPI colapsen (Error 500)
             }
             
-            # El timeout sube a 60 porque ScraperAPI tarda un poco en procesar el proxy
             respuesta = requests.get('http://api.scraperapi.com/', params=parametros_proxy, timeout=60)
             respuesta.raise_for_status()
             
@@ -55,7 +54,6 @@ class MetrobusMonitor:
                         celdas = fila.find_all('td')
                         
                         if len(celdas) >= 4:
-                            # Asignamos el nombre de la línea
                             if i < len(nombres_lineas):
                                 linea = nombres_lineas[i]
                             else:
