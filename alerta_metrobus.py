@@ -5,21 +5,29 @@ from bs4 import BeautifulSoup
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class MetrobusMonitor:
     def __init__(self, url: str):
         self.url = url
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
 
     def obtener_estado_detallado(self) -> str:
+        if not SCRAPER_API_KEY:
+            return "Error: Falta la clave de ScraperAPI en los Secrets."
+
         problemas = []
         try:
-            logging.info("Consultando la página del Metrobús...")
-            respuesta = requests.get(self.url, headers=self.headers, timeout=15)
+            logging.info("Consultando la página del Metrobús vía ScraperAPI...")
+            parametros_proxy = {
+                'api_key': SCRAPER_API_KEY,
+                'url': self.url,
+                'country_code': 'mx'
+                # Nota: 'render': 'true' está desactivado para evitar el Error 500 del servidor
+            }
+            
+            respuesta = requests.get('http://api.scraperapi.com/', params=parametros_proxy, timeout=60)
             respuesta.raise_for_status()
             
             soup = BeautifulSoup(respuesta.text, 'html.parser')
