@@ -28,8 +28,7 @@ jobs:
       - name: Instalar librerías
         run: |
           pip install -r requirements.txt
-          pip install playwright
-          playwright install chromium
+
 
       - name: Ejecutar script
         env:
