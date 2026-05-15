@@ -33,6 +33,6 @@ jobs:
 
       - name: Ejecutar script
         env:
-          MI_NUMERO: ${{ secrets.MI_NUMERO }}
-          API_KEY: ${{ secrets.API_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python alerta_metrobus.py
