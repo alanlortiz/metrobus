@@ -4,8 +4,8 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-MI_NUMERO = os.getenv("MI_NUMERO")
-API_KEY = os.getenv("API_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -18,18 +18,14 @@ class MetrobusMonitor:
         try:
             logging.info("Lanzando navegador headless con Playwright...")
             with sync_playwright() as p:
-                # Lanzamos Chromium de forma invisible
                 browser = p.chromium.launch(headless=True)
                 context = browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
                 )
                 page = context.new_page()
                 
-                # Vamos a la página y esperamos hasta que la red esté inactiva
-                logging.info("Navegando al portal del Metrobús y esperando renderizado...")
+                logging.info("Navegando al portal del Metrobus y esperando renderizado...")
                 page.goto(self.url, wait_until="networkidle", timeout=60000)
-                
-                # Extraemos el HTML ya procesado
                 html = page.content()
                 browser.close()
 
@@ -55,46 +51,32 @@ class MetrobusMonitor:
                             if "servicio regular" not in est_limpio or "ninguna" not in afec_limpio:
                                 problemas.append(f"- {linea}: {est} | {afec}")
             
-            return "*Servicio Regular*" if not problemas else "*AFECTACIONES DETECTADAS:*\n" + "\n".join(problemas)
+            return "Servicio Regular" if not problemas else "AFECTACIONES DETECTADAS:\n" + "\n".join(problemas)
 
         except Exception as e:
             return f"Error ejecutando Playwright: {str(e)}"
 
-    def enviar_whatsapp(self, mensaje: str) -> None:
-        if not MI_NUMERO or not API_KEY:
-            logging.error("ERROR CRITICO: Faltan las credenciales (MI_NUMERO o API_KEY) en los Secrets de GitHub.")
+    def enviar_telegram(self, mensaje: str) -> None:
+        if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+            logging.error("ERROR CRITICO: Faltan credenciales de Telegram (TELEGRAM_TOKEN o TELEGRAM_CHAT_ID) en los Secrets.")
             exit(1)
         
-        # 1. Usamos un diccionario para que requests maneje la codificacion de forma segura
-        parametros = {
-            "phone": MI_NUMERO.strip(),
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
             "text": f"*REPORTE METROBUS*\n\n{mensaje}",
-            "apikey": API_KEY.strip()
+            "parse_mode": "Markdown"
         }
-        
-        # 2. Agregamos el User-Agent para engañar al firewall de CallMeBot (evitar el Error 403)
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        
-        url_base = "https://api.callmebot.com/whatsapp.php"
         
         try:
-            # Mandamos la peticion usando params y headers
-            respuesta = requests.get(url_base, params=parametros, headers=headers, timeout=15)
-            
-            # CallMeBot devuelve 200 OK incluso si falla. Tenemos que leer su texto:
-            texto_respuesta = respuesta.text.lower()
-            if "error" in texto_respuesta or "invalid" in texto_respuesta:
-                logging.error(f"CallMeBot rechazo el mensaje. Respuesta del servidor:\n{respuesta.text}")
-                exit(1) 
-            else:
-                logging.info(f"WhatsApp enviado correctamente. Respuesta del servidor: {respuesta.text}")
+            respuesta = requests.post(url, json=payload, timeout=15)
+            respuesta.raise_for_status() # Esto atrapara cualquier error oficial al instante
+            logging.info("Telegram enviado correctamente.")
                 
         except requests.exceptions.RequestException as e:
-            logging.error(f"Fallo de red al conectar con CallMeBot: {str(e)}")
+            logging.error(f"Fallo de red al conectar con Telegram: {str(e)}")
             exit(1)
 
 if __name__ == "__main__":
     monitor = MetrobusMonitor("https://www.metrobus.cdmx.gob.mx/ServicioMB")
-    monitor.enviar_whatsapp(monitor.obtener_estado_detallado())
+    monitor.enviar_telegram(monitor.obtener_estado_detallado())
