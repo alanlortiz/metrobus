@@ -24,7 +24,6 @@ class MetrobusMonitor:
                 'api_key': SCRAPER_API_KEY,
                 'url': self.url,
                 'country_code': 'mx'
-                # Nota: 'render': 'true' está desactivado para evitar el Error 500 del servidor
             }
             
             respuesta = requests.get('http://api.scraperapi.com/', params=parametros_proxy, timeout=60)
@@ -33,20 +32,48 @@ class MetrobusMonitor:
             soup = BeautifulSoup(respuesta.text, 'html.parser')
             tablas = soup.find_all('table')
 
+            # Diccionario de mapeo basado estrictamente en tu regla de posición de filas
+            mapeo_lineas = {
+                1: "Línea 1",
+                2: "Línea 2",
+                3: "Línea 3",
+                4: "Línea 4",
+                5: "Línea 4",  # Excepción: La fila 5 también pertenece a la Línea 4
+                6: "Línea 5",
+                7: "Línea 6",
+                8: "Línea 7"
+            }
+
             for tabla in tablas:
                 if 'estaciones afectadas' in tabla.text.lower():
-                    for fila in tabla.find_all('tr')[1:]:
+                    # Usamos enumerate empezando en 1 para contar las filas de datos reales
+                    for num_fila, fila in enumerate(tabla.find_all('tr')[1:], start=1):
                         celdas = fila.find_all('td')
+                        
                         if len(celdas) >= 3:
-                            linea = celdas[0].get_text(strip=True)
+                            # Asignamos el nombre de la línea según el número de fila actual
+                            linea_nombre = mapeo_lineas.get(num_fila, f"Línea {num_fila}")
+                            
                             est = celdas[1].get_text(strip=True)
                             afec = celdas[2].get_text(strip=True)
                             
                             est_limpio = est.lower().replace("estado", "").strip()
                             afec_limpio = afec.lower().replace("estaciones afectadas", "").strip()
                             
+                            # Extraemos la cuarta columna (Información adicional) si existe
+                            info_adicional = ""
+                            if len(celdas) >= 4:
+                                info_adicional = celdas[3].get_text(strip=True).replace("Información adicional", "").strip()
+                            
                             if "servicio regular" not in est_limpio or "ninguna" not in afec_limpio:
-                                problemas.append(f"- {linea}: {est} | {afec}")
+                                # Construimos el renglón base de la afectación
+                                reporte_linea = f"- *{linea_nombre}*: {est} | {afec}"
+                                
+                                # Si hay información adicional válida, la agregamos al final del reporte
+                                if info_adicional and info_adicional.lower() != "ninguna":
+                                    reporte_linea += f" | Info: {info_adicional}"
+                                    
+                                problemas.append(reporte_linea)
             
             return "Servicio Regular. Todo en orden." if not problemas else "AFECTACIONES DETECTADAS:\n" + "\n".join(problemas)
 
@@ -73,7 +100,6 @@ class MetrobusMonitor:
             exit(1)
 
 if __name__ == "__main__":
-    # Apuntamos directo al servidor interno de SEMOVI que alimenta el iframe
     url_directa = "https://incidentesmovilidad.cdmx.gob.mx/public/bandejaEstadoServicio.xhtml?idMedioTransporte=mb"
     monitor = MetrobusMonitor(url_directa)
     monitor.enviar_telegram(monitor.obtener_estado_detallado())
