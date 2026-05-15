@@ -2,7 +2,10 @@ import os
 import logging
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+import urllib3
+
+# Ocultamos advertencias si el certificado de seguridad del gobierno falla
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -13,79 +16,78 @@ class MetrobusMonitor:
     def __init__(self, url: str):
         self.url = url
 
-    def obtener_estado_detallado(self) -> str:
-        problemas = []
+    def obtener_estado_linea_1(self) -> str:
         try:
-            logging.info("Lanzando navegador headless con Playwright...")
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-                )
-                page = context.new_page()
-                
-                logging.info("Navegando al portal del Metrobus...")
-                # Cambiamos "networkidle" por "domcontentloaded" (mas rapido y no se traba con scripts infinitos)
-                page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
-                
-                # Le decimos que espere especificamente a que exista una tabla en la pagina (maximo 15 segundos)
-                logging.info("Esperando a que el JavaScript renderice la tabla...")
-                try:
-                    page.wait_for_selector("table", timeout=15000)
-                except Exception:
-                    logging.warning("Las tablas tardaron demasiado en aparecer, intentaremos extraer el HTML actual.")
-
-                html = page.content()
-                browser.close()
-
-            logging.info("Analizando el DOM...")
-            soup = BeautifulSoup(html, 'html.parser')
+            logging.info("Consultando directamente el portal del Metrobús...")
+            # Usamos cabeceras para parecer un navegador normal
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
+            }
+            
+            # verify=False ayuda a que no falle si la página de gobierno tiene problemas de seguridad básicos
+            respuesta = requests.get(self.url, headers=headers, timeout=20, verify=False)
+            respuesta.raise_for_status()
+            
+            soup = BeautifulSoup(respuesta.text, 'html.parser')
             tablas = soup.find_all('table')
             
-            if not tablas:
-                logging.warning("No se detectaron tablas en el HTML renderizado.")
-
             for tabla in tablas:
-                if 'estaciones afectadas' in tabla.text.lower():
-                    for fila in tabla.find_all('tr')[1:]:
+                # Buscamos la tabla correcta
+                if 'Estaciones afectadas' in tabla.text:
+                    filas = tabla.find_all('tr')
+                    
+                    # Recorremos cada fila saltando los encabezados
+                    for fila in filas[1:]:
                         celdas = fila.find_all('td')
                         if len(celdas) >= 3:
-                            linea = celdas[0].get_text(strip=True)
-                            est = celdas[1].get_text(strip=True)
-                            afec = celdas[2].get_text(strip=True)
+                            # La columna 1 suele tener la imagen del número de línea.
+                            # Extraemos todo (texto, nombres de imagen, etc) para asegurar que leemos la "1"
+                            identificador = celdas[0].get_text(strip=True)
+                            img = celdas[0].find('img')
+                            if img:
+                                identificador += str(img.get('src', '')) + str(img.get('alt', ''))
                             
-                            est_limpio = est.lower().replace("estado", "").strip()
-                            afec_limpio = afec.lower().replace("estaciones afectadas", "").strip()
-                            
-                            if "servicio regular" not in est_limpio or "ninguna" not in afec_limpio:
-                                problemas.append(f"- {linea}: {est} | {afec}")
-            
-            return "Servicio Regular. Todo en orden." if not problemas else "AFECTACIONES DETECTADAS:\n" + "\n".join(problemas)
+                            # Si detectamos un "1" en la primera columna, es la Línea 1
+                            if '1' in identificador:
+                                estado = celdas[1].get_text(strip=True).replace("Estado", "").strip()
+                                afectadas = celdas[2].get_text(strip=True).replace("Estaciones afectadas", "").strip()
+                                
+                                info = ""
+                                if len(celdas) >= 4:
+                                    info = celdas[3].get_text(strip=True).replace("Información adicional", "").strip()
+                                
+                                # LÓGICA SOLICITADA:
+                                if "servicio regular" in estado.lower():
+                                    return "✅ Servicio Regular"
+                                else:
+                                    mensaje = f"⚠️ LÍNEA 1: {estado}"
+                                    if afectadas and "ninguna" not in afectadas.lower():
+                                        mensaje += f"\nCerradas: {afectadas}"
+                                    if info:
+                                        mensaje += f"\nInfo: {info}"
+                                    return mensaje
+                                    
+            return "❌ Error: La página cargó pero no encontré la información de la Línea 1."
 
         except Exception as e:
-            return f"Error ejecutando Playwright: {str(e)}"
+            return f"❌ Error de red al consultar la página: {str(e)}"
 
     def enviar_telegram(self, mensaje: str) -> None:
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-            logging.error("ERROR CRITICO: Faltan credenciales de Telegram en los Secrets.")
+            logging.error("Faltan credenciales de Telegram.")
             exit(1)
         
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": f"*REPORTE METROBUS*\n\n{mensaje}",
-            "parse_mode": "Markdown"
-        }
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje}
         
         try:
-            respuesta = requests.post(url, json=payload, timeout=15)
-            respuesta.raise_for_status() 
+            requests.post(url, json=payload, timeout=15)
             logging.info("Telegram enviado correctamente.")
-                
         except requests.exceptions.RequestException as e:
-            logging.error(f"Fallo de red al conectar con Telegram: {str(e)}")
+            logging.error(f"Fallo al enviar Telegram: {str(e)}")
             exit(1)
 
 if __name__ == "__main__":
     monitor = MetrobusMonitor("https://www.metrobus.cdmx.gob.mx/ServicioMB")
-    monitor.enviar_telegram(monitor.obtener_estado_detallado())
+    reporte = monitor.obtener_estado_linea_1()
+    monitor.enviar_telegram(reporte)
