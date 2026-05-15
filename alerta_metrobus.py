@@ -18,29 +18,15 @@ class MetrobusMonitor:
             return "Error: Falta la clave de ScraperAPI en los Secrets."
 
         problemas = []
-        
-        # Mapeo de las filas a las líneas del Metrobús (Fila 4 y 5 son Línea 4)
-        nombres_lineas = [
-            "Línea 1",
-            "Línea 2",
-            "Línea 3",
-            "Línea 4", 
-            "Línea 4", 
-            "Línea 5",
-            "Línea 6",
-            "Línea 7"
-        ]
-
         try:
-            logging.info("Consultando la página a través de ScraperAPI...")
+            logging.info("Consultando la página del Metrobús vía ScraperAPI...")
             parametros_proxy = {
                 'api_key': SCRAPER_API_KEY,
                 'url': self.url,
-                'country_code': 'mx',
-                'render': 'true' # Forzamos el renderizado JS para que cargue la tabla
+                'country_code': 'mx'
+                # Nota: 'render': 'true' está desactivado para evitar el Error 500 del servidor
             }
             
-            # El timeout sube a 60 porque ScraperAPI tarda un poco en procesar el proxy
             respuesta = requests.get('http://api.scraperapi.com/', params=parametros_proxy, timeout=60)
             respuesta.raise_for_status()
             
@@ -49,40 +35,23 @@ class MetrobusMonitor:
 
             for tabla in tablas:
                 if 'estaciones afectadas' in tabla.text.lower():
-                    filas = tabla.find_all('tr')[1:]
-                    
-                    for i, fila in enumerate(filas):
+                    for fila in tabla.find_all('tr')[1:]:
                         celdas = fila.find_all('td')
-                        
-                        if len(celdas) >= 4:
-                            # Asignamos el nombre de la línea
-                            if i < len(nombres_lineas):
-                                linea = nombres_lineas[i]
-                            else:
-                                linea = f"Línea Desconocida (Fila {i+1})"
-                                
+                        if len(celdas) >= 3:
+                            linea = celdas[0].get_text(strip=True)
                             est = celdas[1].get_text(strip=True)
                             afec = celdas[2].get_text(strip=True)
-                            info_adicional = celdas[3].get_text(strip=True)
                             
                             est_limpio = est.lower().replace("estado", "").strip()
                             afec_limpio = afec.lower().replace("estaciones afectadas", "").strip()
-                            info_limpia = info_adicional.replace("Información adicional", "").strip()
                             
                             if "servicio regular" not in est_limpio or "ninguna" not in afec_limpio:
-                                mensaje_afectacion = f"- {linea}: {est} | Cerradas: {afec}"
-                                
-                                if info_limpia:
-                                    mensaje_afectacion += f" | Info: {info_limpia}"
-                                    
-                                problemas.append(mensaje_afectacion)
+                                problemas.append(f"- {linea}: {est} | {afec}")
             
             return "Servicio Regular. Todo en orden." if not problemas else "AFECTACIONES DETECTADAS:\n" + "\n".join(problemas)
 
-        except requests.exceptions.RequestException as e:
-            return f"Error de conexión con ScraperAPI: {str(e)}"
         except Exception as e:
-            return f"Error inesperado en la extracción: {str(e)}"
+            return f"Error en la extracción: {str(e)}"
 
     def enviar_telegram(self, mensaje: str) -> None:
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -104,5 +73,7 @@ class MetrobusMonitor:
             exit(1)
 
 if __name__ == "__main__":
-    monitor = MetrobusMonitor("https://incidentesmovilidad.cdmx.gob.mx/public/bandejaEstadoServicio.xhtml?idMedioTransporte=mb")
+    # Apuntamos directo al servidor interno de SEMOVI que alimenta el iframe
+    url_directa = "https://incidentesmovilidad.cdmx.gob.mx/public/bandejaEstadoServicio.xhtml?idMedioTransporte=mb"
+    monitor = MetrobusMonitor(url_directa)
     monitor.enviar_telegram(monitor.obtener_estado_detallado())
