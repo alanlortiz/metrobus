@@ -24,8 +24,17 @@ class MetrobusMonitor:
                 )
                 page = context.new_page()
                 
-                logging.info("Navegando al portal del Metrobus y esperando renderizado...")
-                page.goto(self.url, wait_until="networkidle", timeout=60000)
+                logging.info("Navegando al portal del Metrobus...")
+                # Cambiamos "networkidle" por "domcontentloaded" (mas rapido y no se traba con scripts infinitos)
+                page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
+                
+                # Le decimos que espere especificamente a que exista una tabla en la pagina (maximo 15 segundos)
+                logging.info("Esperando a que el JavaScript renderice la tabla...")
+                try:
+                    page.wait_for_selector("table", timeout=15000)
+                except Exception:
+                    logging.warning("Las tablas tardaron demasiado en aparecer, intentaremos extraer el HTML actual.")
+
                 html = page.content()
                 browser.close()
 
@@ -51,14 +60,14 @@ class MetrobusMonitor:
                             if "servicio regular" not in est_limpio or "ninguna" not in afec_limpio:
                                 problemas.append(f"- {linea}: {est} | {afec}")
             
-            return "Servicio Regular" if not problemas else "AFECTACIONES DETECTADAS:\n" + "\n".join(problemas)
+            return "Servicio Regular. Todo en orden." if not problemas else "AFECTACIONES DETECTADAS:\n" + "\n".join(problemas)
 
         except Exception as e:
             return f"Error ejecutando Playwright: {str(e)}"
 
     def enviar_telegram(self, mensaje: str) -> None:
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-            logging.error("ERROR CRITICO: Faltan credenciales de Telegram (TELEGRAM_TOKEN o TELEGRAM_CHAT_ID) en los Secrets.")
+            logging.error("ERROR CRITICO: Faltan credenciales de Telegram en los Secrets.")
             exit(1)
         
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -70,7 +79,7 @@ class MetrobusMonitor:
         
         try:
             respuesta = requests.post(url, json=payload, timeout=15)
-            respuesta.raise_for_status() # Esto atrapara cualquier error oficial al instante
+            respuesta.raise_for_status() 
             logging.info("Telegram enviado correctamente.")
                 
         except requests.exceptions.RequestException as e:
