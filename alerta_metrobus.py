@@ -5,34 +5,43 @@ from bs4 import BeautifulSoup
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class MetrobusMonitor:
     def __init__(self, url: str):
         self.url = url
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
 
     def obtener_estado_detallado(self) -> str:
+        if not SCRAPER_API_KEY:
+            return "Error: Falta la clave de ScraperAPI en los Secrets."
+
         problemas = []
         
-        # Mapeo exacto de las filas a las líneas del Metrobús
+        # Mapeo de las filas a las líneas del Metrobús (Fila 4 y 5 son Línea 4)
         nombres_lineas = [
             "Línea 1",
             "Línea 2",
             "Línea 3",
-            "Línea 4", # Fila 4 (Ruta Norte/Sur)
-            "Línea 4", # Fila 5 (Excepción solicitada)
+            "Línea 4", 
+            "Línea 4", 
             "Línea 5",
             "Línea 6",
             "Línea 7"
         ]
 
         try:
-            logging.info("Consultando la página del Metrobús...")
-            respuesta = requests.get(self.url, headers=self.headers, timeout=15)
+            logging.info("Consultando la página a través de ScraperAPI...")
+            parametros_proxy = {
+                'api_key': SCRAPER_API_KEY,
+                'url': self.url,
+                'country_code': 'mx',
+                'render': 'true' # Forzamos el renderizado JS para que cargue la tabla
+            }
+            
+            # El timeout sube a 60 porque ScraperAPI tarda un poco en procesar el proxy
+            respuesta = requests.get('http://api.scraperapi.com/', params=parametros_proxy, timeout=60)
             respuesta.raise_for_status()
             
             soup = BeautifulSoup(respuesta.text, 'html.parser')
@@ -40,15 +49,13 @@ class MetrobusMonitor:
 
             for tabla in tablas:
                 if 'estaciones afectadas' in tabla.text.lower():
-                    # Obtenemos todas las filas saltando la fila 0 (que son los encabezados)
                     filas = tabla.find_all('tr')[1:]
                     
                     for i, fila in enumerate(filas):
                         celdas = fila.find_all('td')
                         
-                        # Aseguramos que existan al menos 4 celdas para leer la info adicional
                         if len(celdas) >= 4:
-                            # Asignamos el nombre de la línea dependiendo del número de fila
+                            # Asignamos el nombre de la línea
                             if i < len(nombres_lineas):
                                 linea = nombres_lineas[i]
                             else:
@@ -58,7 +65,6 @@ class MetrobusMonitor:
                             afec = celdas[2].get_text(strip=True)
                             info_adicional = celdas[3].get_text(strip=True)
                             
-                            # Limpieza de textos (por el diseño responsivo de la web)
                             est_limpio = est.lower().replace("estado", "").strip()
                             afec_limpio = afec.lower().replace("estaciones afectadas", "").strip()
                             info_limpia = info_adicional.replace("Información adicional", "").strip()
@@ -66,7 +72,6 @@ class MetrobusMonitor:
                             if "servicio regular" not in est_limpio or "ninguna" not in afec_limpio:
                                 mensaje_afectacion = f"- {linea}: {est} | Cerradas: {afec}"
                                 
-                                # Solo agregamos la información adicional si no está vacía
                                 if info_limpia:
                                     mensaje_afectacion += f" | Info: {info_limpia}"
                                     
@@ -74,8 +79,10 @@ class MetrobusMonitor:
             
             return "Servicio Regular. Todo en orden." if not problemas else "AFECTACIONES DETECTADAS:\n" + "\n".join(problemas)
 
+        except requests.exceptions.RequestException as e:
+            return f"Error de conexión con ScraperAPI: {str(e)}"
         except Exception as e:
-            return f"Error en la extracción: {str(e)}"
+            return f"Error inesperado en la extracción: {str(e)}"
 
     def enviar_telegram(self, mensaje: str) -> None:
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
