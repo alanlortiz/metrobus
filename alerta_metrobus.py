@@ -2,10 +2,11 @@ import os
 import logging
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 
+# Credenciales desde GitHub Secrets
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -14,62 +15,64 @@ class MetrobusMonitor:
         self.url = url
 
     def obtener_estado_detallado(self) -> str:
-        problemas = []
+        if not SCRAPER_API_KEY:
+            return "❌ Error: Falta la clave de ScraperAPI en los Secrets."
+
         try:
-            logging.info("Lanzando navegador headless con Playwright...")
-            with sync_playwright() as p:
-                # CORRECCIÓN: Ignorar errores de certificado a nivel navegador
-                browser = p.chromium.launch(headless=True, args=['--ignore-certificate-errors'])
-                
-                # CORRECCIÓN: Ignorar errores de certificado a nivel contexto
-                context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-                    ignore_https_errors=True
-                )
-                page = context.new_page()
-                
-                logging.info("Navegando al portal del Metrobus...")
-                page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
-                
-                logging.info("Esperando a que el JavaScript renderice la tabla...")
-                try:
-                    page.wait_for_selector("table", timeout=15000)
-                except Exception:
-                    logging.warning("Las tablas tardaron demasiado en aparecer, intentaremos extraer el HTML actual.")
-
-                html = page.content()
-                browser.close()
-
-            logging.info("Analizando el DOM...")
-            soup = BeautifulSoup(html, 'html.parser')
-            tablas = soup.find_all('table')
+            # Usamos ScraperAPI con renderizado JS, pero SIN el premium que causaba el Error 500
+            params = {
+                'api_key': SCRAPER_API_KEY,
+                'url': self.url,
+                'country_code': 'mx',
+                'render': 'true' 
+            }
             
-            if not tablas:
-                logging.warning("No se detectaron tablas en el HTML renderizado.")
+            logging.info("Consultando página a través de ScraperAPI...")
+            # Damos 90 segundos porque el renderizado JS en servidores proxy toma tiempo
+            respuesta = requests.get('http://api.scraperapi.com/', params=params, timeout=90)
+            respuesta.raise_for_status()
+
+            soup = BeautifulSoup(respuesta.text, 'html.parser')
+            tablas = soup.find_all('table')
+            problemas = []
+            tabla_encontrada = False
 
             for tabla in tablas:
+                # Buscamos la tabla correcta
                 if 'estaciones afectadas' in tabla.text.lower():
-                    for fila in tabla.find_all('tr')[1:]:
-                        celdas = fila.find_all('td')
+                    tabla_encontrada = True
+                    filas = tabla.find_all('tr')
+                    
+                    for fila in filas[1:]: # Saltamos el encabezado
+                        # Buscamos tanto 'td' como 'th' por si la línea 1 está formateada diferente
+                        celdas = fila.find_all(['td', 'th']) 
                         if len(celdas) >= 3:
-                            linea = celdas[0].get_text(strip=True)
-                            est = celdas[1].get_text(strip=True)
-                            afec = celdas[2].get_text(strip=True)
+                            # get_text con separator ayuda a limpiar etiquetas ocultas de móviles
+                            linea = celdas[0].get_text(separator=" ", strip=True)
+                            est = celdas[1].get_text(separator=" ", strip=True)
+                            afec = celdas[2].get_text(separator=" ", strip=True)
                             
                             est_limpio = est.lower().replace("estado", "").strip()
                             afec_limpio = afec.lower().replace("estaciones afectadas", "").strip()
                             
                             if "servicio regular" not in est_limpio or "ninguna" not in afec_limpio:
-                                problemas.append(f"- {linea}: {est} | {afec}")
+                                problemas.append(f"- {linea}: {est} | Cerradas: {afec}")
             
-            return "Servicio Regular. Todo en orden." if not problemas else "AFECTACIONES DETECTADAS:\n" + "\n".join(problemas)
+            # Candado de seguridad: Si no vio la tabla, te avisa en lugar de dar un falso positivo
+            if not tabla_encontrada:
+                logging.warning("No se encontró la tabla de afectaciones. La estructura web cambió.")
+                return "⚠️ El bot logró conectarse, pero no pudo leer la tabla de afectaciones."
+            
+            return "✅ Servicio Regular" if not problemas else "⚠️ AFECTACIONES DETECTADAS:\n" + "\n".join(problemas)
 
+        except requests.exceptions.RequestException as e:
+            return f"❌ Error de red (ScraperAPI): {str(e)}"
         except Exception as e:
-            return f"❌ Error en la extracción: {str(e)}"
+            return f"❌ Error extrayendo datos: {str(e)}"
 
     def enviar_telegram(self, mensaje: str) -> None:
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-            logging.error("ERROR CRÍTICO: Faltan credenciales de Telegram en los Secrets.")
+            logging.error("ERROR CRÍTICO: Faltan credenciales de Telegram.")
             exit(1)
         
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -85,7 +88,7 @@ class MetrobusMonitor:
             logging.info("Telegram enviado correctamente.")
                 
         except requests.exceptions.RequestException as e:
-            logging.error(f"Fallo de red al conectar con Telegram: {str(e)}")
+            logging.error(f"Fallo al conectar con Telegram: {str(e)}")
             exit(1)
 
 if __name__ == "__main__":
