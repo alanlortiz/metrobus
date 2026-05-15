@@ -1,8 +1,8 @@
 import os
 import logging
 import requests
-import time
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -19,73 +19,81 @@ class MetrobusMonitor:
             return "❌ Error: Falta la clave de ScraperAPI."
 
         problemas = []
-        # REACTIVAMOS JS (render: true) pero QUITAMOS la restricción de país (mx)
-        # Esto usará los servidores globales premium para evitar el Error 500.
-        parametros = {
-            'api_key': SCRAPER_API_KEY,
-            'url': self.url,
-            'render': 'true'
-        }
-        
-        intentos = 3
-        html_content = ""
-        
-        # Sistema de reintentos para hacer el script indestructible
-        for i in range(intentos):
-            try:
-                logging.info(f"Intento {i+1} de {intentos}: Esperando a que el JavaScript de la página dibuje la tabla...")
-                respuesta = requests.get('http://api.scraperapi.com/', params=parametros, timeout=60)
-                respuesta.raise_for_status()
-                html_content = respuesta.text
-                break  # Si tiene éxito y no colapsa, rompemos el ciclo
-            except Exception as e:
-                logging.warning(f"El proxy falló en el intento {i+1}: {e}")
-                if i == intentos - 1:
-                    return f"❌ Error extrayendo la página tras {intentos} intentos: {str(e)}"
-                time.sleep(5) # Pausamos 5 segundos antes de volver a intentarlo
+        try:
+            logging.info("Lanzando Playwright a través del túnel proxy de ScraperAPI...")
+            with sync_playwright() as p:
+                # Usamos ScraperAPI solo como un túnel para que el Metrobús no bloquee a GitHub.
+                # Playwright es el que dibujará la página web.
+                browser = p.chromium.launch(
+                    headless=True,
+                    proxy={
+                        "server": "http://proxy-server.scraperapi.com:8001",
+                        "username": "scraperapi",
+                        "password": SCRAPER_API_KEY
+                    }
+                )
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                page = context.new_page()
 
-        logging.info("Analizando los datos reales...")
-        soup = BeautifulSoup(html_content, 'html.parser')
-        tablas = soup.find_all('table')
+                logging.info("Navegando al portal del Metrobús...")
+                page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
 
-        if not tablas:
-            logging.warning("No se detectaron tablas en el HTML.")
+                # Le damos 5 segundos exactos al JavaScript del Metrobús para que dibuje la tabla roja
+                logging.info("Esperando a que la página cargue los datos reales...")
+                page.wait_for_timeout(5000) 
 
-        for tabla in tablas:
-            if 'estaciones afectadas' in tabla.text.lower():
-                for fila in tabla.find_all('tr')[1:]:
-                    celdas = fila.find_all('td')
-                    if len(celdas) >= 3:
-                        linea = celdas[0].get_text(strip=True)
-                        est = celdas[1].get_text(strip=True)
-                        afec = celdas[2].get_text(strip=True)
-                        
-                        est_limpio = est.lower().replace("estado", "").strip()
-                        afec_limpio = afec.lower().replace("estaciones afectadas", "").strip()
-                        
-                        if "servicio regular" not in est_limpio or "ninguna" not in afec_limpio:
-                            # Formateamos bonito para que no mande un "1" suelto, sino "Línea 1"
-                            problemas.append(f"🚇 *Línea {linea}:* {est} | {afec}")
-        
-        return "✅ Servicio Regular. Todo en orden para tu viaje." if not problemas else "⚠️ *AFECTACIONES DETECTADAS:*\n\n" + "\n".join(problemas)
+                html = page.content()
+                browser.close()
+
+            logging.info("Analizando los datos extraídos...")
+            soup = BeautifulSoup(html, 'html.parser')
+            tablas = soup.find_all('table')
+
+            if not tablas:
+                logging.warning("No se detectaron tablas.")
+
+            for tabla in tablas:
+                if 'estaciones afectadas' in tabla.text.lower():
+                    for fila in tabla.find_all('tr')[1:]:
+                        celdas = fila.find_all('td')
+                        if len(celdas) >= 3:
+                            linea = celdas[0].get_text(strip=True)
+                            est = celdas[1].get_text(strip=True)
+                            afec = celdas[2].get_text(strip=True)
+                            
+                            est_limpio = est.lower().replace("estado", "").strip()
+                            afec_limpio = afec.lower().replace("estaciones afectadas", "").strip()
+                            
+                            if "servicio regular" not in est_limpio or "ninguna" not in afec_limpio:
+                                problemas.append(f"🚇 Línea {linea}: {est} | Cerradas: {afec}")
+            
+            return "✅ Servicio Regular. Todo en orden." if not problemas else "⚠️ AFECTACIONES DETECTADAS:\n\n" + "\n".join(problemas)
+
+        except Exception as e:
+            return f"❌ Error en la extracción: {str(e)}"
 
     def enviar_telegram(self, mensaje: str) -> None:
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-            logging.error("ERROR CRÍTICO: Faltan credenciales de Telegram.")
+            logging.error("Faltan credenciales de Telegram.")
             exit(1)
             
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
-            "text": f"📍 *REPORTE METROBÚS*\n\n{mensaje}",
-            "parse_mode": "Markdown"
+            "text": f"REPORTE METROBÚS\n\n{mensaje}"
+            # Se eliminó el parse_mode="Markdown" para evitar bloqueos por caracteres especiales
         }
         
         try:
-            requests.post(url, json=payload, timeout=15)
+            respuesta = requests.post(url, json=payload, timeout=15)
+            respuesta.raise_for_status() # Ahora SÍ te avisará en la consola si Telegram rechaza el mensaje
             logging.info("Mensaje de Telegram enviado con éxito.")
         except Exception as e:
-            logging.error(f"Error enviando Telegram: {e}")
+            # Capturamos el error real de Telegram para poder leerlo
+            detalle = respuesta.text if 'respuesta' in locals() else "Sin respuesta"
+            logging.error(f"Error enviando Telegram: {e}. Detalle: {detalle}")
             exit(1)
 
 if __name__ == "__main__":
