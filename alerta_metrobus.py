@@ -85,7 +85,7 @@ class MetrobusMonitor:
             return f"Error en extracción SEMOVI: {str(e)}"
 
     def procesar_datos_gtfs(self) -> tuple:
-        """Calcula el asistente personal, el termómetro y los hotspots usando una sola descarga"""
+        """Calcula el asistente personal, el termómetro direccional y los hotspots usando una sola descarga"""
         if not USUARIO or not SENHA:
             return "", "", ""
 
@@ -97,6 +97,7 @@ class MetrobusMonitor:
             auth_res.raise_for_status()
             urls = auth_res.json()
             
+            # 1. Mapeo estático (Rutas y Estaciones)
             zip_res = requests.get(urls['urlStatic'], timeout=30)
             mapa_rutas = {}
             mapa_paradas = []
@@ -116,10 +117,12 @@ class MetrobusMonitor:
                             'lon': float(fila['stop_lon'])
                         })
 
+            # 2. Descarga del radar en vivo
             rt_res = requests.get(urls['urlRealTime'], timeout=30)
             feed = gtfs_realtime_pb2.FeedMessage()
             feed.ParseFromString(rt_res.content)
             
+            # --- PREPARACIÓN DE DATOS ---
             hora_cdmx = (datetime.datetime.utcnow() - datetime.timedelta(hours=6)).hour
             es_manana = hora_cdmx < 12 
 
@@ -141,6 +144,8 @@ class MetrobusMonitor:
                     if not nombre_linea: continue
 
                     velocidad_kmh = entidad.vehicle.position.speed * 3.6
+                    bearing = entidad.vehicle.position.bearing 
+                    
                     if nombre_linea not in buses_por_ruta:
                         buses_por_ruta[nombre_linea] = []
                         
@@ -148,13 +153,14 @@ class MetrobusMonitor:
                         'id': entidad.vehicle.vehicle.id if entidad.vehicle.HasField("vehicle") else str(entidad.id),
                         'lat': entidad.vehicle.position.latitude,
                         'lon': entidad.vehicle.position.longitude,
-                        'speed': velocidad_kmh
+                        'speed': velocidad_kmh,
+                        'bearing': bearing
                     })
                     
+                    # Filtramos exclusivamente la Línea 1 para el Asistente
                     if nombre_linea == "Línea 1":
                         lat_bus = entidad.vehicle.position.latitude
                         lon_bus = entidad.vehicle.position.longitude
-                        bearing = entidad.vehicle.position.bearing 
                         
                         distancia = self.calcular_distancia(lat_origen, lon_origen, lat_bus, lon_bus)
                         
@@ -167,6 +173,7 @@ class MetrobusMonitor:
                             if va_al_norte and esta_al_sur and distancia <= 6.0:
                                 buses_utiles.append(distancia)
 
+            # --- LÓGICA OPCIÓN 1: ASISTENTE PERSONAL ---
             buses_utiles.sort()
             titulo_asis = f"🎯 *ASISTENTE PERSONAL (GPS)*\n_Tu viaje: {estacion} ➔ {destino}_\n"
             
@@ -188,22 +195,38 @@ class MetrobusMonitor:
                     reporte_asistente = titulo_asis + f"🚌 *Próximo Metrobús:* A {el_proximo:.1f} km.\n⏱️ *Llegada estimada:* ~{tiempo_min} minutos.\n📊 Vienen {len(buses_utiles)} unidades más en camino (radio 6km)."
 
 
+            # --- LÓGICA OPCIÓN 3: TERMÓMETRO DE LÍNEA DIRECCIONAL ---
             reporte_termometro = ""
             buses_l1 = buses_por_ruta.get("Línea 1", [])
             
             if buses_l1:
-                avg_speed_l1 = sum(b['speed'] for b in buses_l1) / len(buses_l1)
+                # Aplicamos el Filtro de Anomalías (ignoramos velocidades > 65 km/h)
+                # Y dividimos por dirección usando los grados del satélite
+                buses_norte = [b for b in buses_l1 if (b['bearing'] < 90 or b['bearing'] > 270) and b['speed'] <= 65.0]
+                buses_sur = [b for b in buses_l1 if (90 <= b['bearing'] <= 270) and b['speed'] <= 65.0]
                 
-                if avg_speed_l1 >= 14.0:
-                    estado_term = "🟢 Fluido"
-                elif avg_speed_l1 >= 10.0:
-                    estado_term = "🟡 Moderado"
-                else:
-                    estado_term = "🔴 Tráfico Pesado"
+                def evaluar_estado_velocidad(buses_filtrados):
+                    if not buses_filtrados:
+                        return "⚪ Sin datos", 0.0
+                    avg_speed = sum(b['speed'] for b in buses_filtrados) / len(buses_filtrados)
+                    if avg_speed >= 14.0:
+                        return "🟢 Fluido", avg_speed
+                    elif avg_speed >= 10.0:
+                        return "🟡 Moderado", avg_speed
+                    else:
+                        return "🔴 Tráfico Pesado", avg_speed
+
+                estado_norte, vel_norte = evaluar_estado_velocidad(buses_norte)
+                estado_sur, vel_sur = evaluar_estado_velocidad(buses_sur)
                     
-                reporte_termometro = f"🌡️ *TERMÓMETRO DE RUTA*\n- *Línea 1*: {estado_term} (Vel. promedio: {avg_speed_l1:.1f} km/h)"
+                reporte_termometro = (
+                    "🌡️ *TERMÓMETRO DE RUTA (L1)*\n"
+                    f"⬆️ *Norte (Indios Verdes):* {estado_norte} ({vel_norte:.1f} km/h)\n"
+                    f"⬇️ *Sur (Caminero):* {estado_sur} ({vel_sur:.1f} km/h)"
+                )
 
 
+            # --- LÓGICA OPCIÓN 2: HOTSPOTS (Embotellamientos) ---
             hotspots_msg = []
             terminales_ignoradas = ["indios verdes", "caminero", "gálvez", "colonia del valle", 
                                     "tepalcates", "tacubaya", "etiopía", "tenayuca", "santa cruz atoyac", 
@@ -228,11 +251,16 @@ class MetrobusMonitor:
                             cluster.append(bus_destino)
                             
                     if len(cluster) >= 4:
-                        avg_speed = sum(b['speed'] for b in cluster) / len(cluster)
+                        # También aplicamos el filtro de velocidad para los hotspots
+                        cluster_valido = [b for b in cluster if b['speed'] <= 65.0]
+                        if not cluster_valido:
+                            continue
+                            
+                        avg_speed = sum(b['speed'] for b in cluster_valido) / len(cluster_valido)
                         
                         if avg_speed < 12.0: 
-                            centro_lat = sum(b['lat'] for b in cluster) / len(cluster)
-                            centro_lon = sum(b['lon'] for b in cluster) / len(cluster)
+                            centro_lat = sum(b['lat'] for b in cluster_valido) / len(cluster_valido)
+                            centro_lon = sum(b['lon'] for b in cluster_valido) / len(cluster_valido)
                             
                             estacion_cercana = "Desconocida"
                             min_dist = 999.0
@@ -245,9 +273,9 @@ class MetrobusMonitor:
                             es_terminal = any(t in estacion_cercana.lower() for t in terminales_ignoradas)
                             
                             if not es_terminal:
-                                hotspots_msg.append(f"- 🚨 Fuerte aglomeración ({len(cluster)} unidades) cerca de *{estacion_cercana}*. Vel: {avg_speed:.1f} km/h.")
+                                hotspots_msg.append(f"- 🚨 Fuerte aglomeración ({len(cluster_valido)} unidades) cerca de *{estacion_cercana}*. Vel: {avg_speed:.1f} km/h.")
                                 
-                                for b in cluster:
+                                for b in cluster_valido:
                                     buses_procesados.add(b['id'])
 
             reporte_hotspots = "⚠️ *ALERTAS DE TRÁFICO EN VIVO (Hotspots Línea 1)*\n" + "\n".join(hotspots_msg) if hotspots_msg else ""
@@ -262,6 +290,7 @@ class MetrobusMonitor:
         reporte_oficial = self.obtener_estado_oficial()
         reporte_asistente, reporte_termometro, reporte_hotspots = self.procesar_datos_gtfs()
         
+        # Ensamblamos el mensaje
         mensaje_final = f"{reporte_oficial}"
         if reporte_asistente:
             mensaje_final += f"\n\n{reporte_asistente}"
