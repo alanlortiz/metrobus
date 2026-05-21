@@ -4,6 +4,8 @@ import requests
 import zipfile
 import io
 import csv
+import math
+import datetime
 from bs4 import BeautifulSoup
 from google.transit import gtfs_realtime_pb2
 
@@ -19,14 +21,23 @@ class MetrobusMonitor:
     def __init__(self, url_semovi: str):
         self.url_semovi = url_semovi
 
+    @staticmethod
+    def calcular_distancia(lat1, lon1, lat2, lon2):
+        """Calcula la distancia en línea recta (en km) entre dos coordenadas usando la fórmula de Haversine."""
+        R = 6371.0 
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R * c
+
     def obtener_estado_oficial(self) -> str:
-        """Extrae las alertas de texto oficiales usando ScraperAPI"""
+        """Extrae las alertas oficiales de la web del gobierno"""
         if not SCRAPER_API_KEY:
             return "Error: Falta la clave de ScraperAPI."
 
         problemas = []
         try:
-            logging.info("Consultando la página de SEMOVI vía ScraperAPI...")
             parametros_proxy = {
                 'api_key': SCRAPER_API_KEY,
                 'url': self.url_semovi,
@@ -73,24 +84,19 @@ class MetrobusMonitor:
         except Exception as e:
             return f"Error en extracción SEMOVI: {str(e)}"
 
-    def obtener_radar_gtfs(self) -> str:
-        """Se conecta a la API de Sonda, mapea IDs y cuenta camiones detenidos"""
+    def obtener_asistente_personal(self) -> str:
+        """Calcula el tiempo de llegada (ETA) de los autobuses a tus estaciones específicas"""
         if not USUARIO or not SENHA:
-            logging.error("Faltan las credenciales de GTFS Sonda en los Secrets.")
             return ""
 
         try:
-            logging.info("Autenticando en API GTFS de Sonda...")
             url_auth = "https://metrobus-gtfs.sinopticoplus.com/gtfs-api/partnerValidation"
-            
-            # CORRECCIÓN AQUÍ: Quitamos las comillas para usar las variables reales
             credenciales = {"usuario": USUARIO, "senha": SENHA}
             
             auth_res = requests.post(url_auth, json=credenciales, timeout=15)
             auth_res.raise_for_status()
             urls = auth_res.json()
             
-            logging.info("Descargando mapa de rutas (Estático)...")
             zip_res = requests.get(urls['urlStatic'], timeout=30)
             mapa_rutas = {}
             with zipfile.ZipFile(io.BytesIO(zip_res.content)) as z:
@@ -98,47 +104,85 @@ class MetrobusMonitor:
                     lector = csv.DictReader(io.TextIOWrapper(f, 'utf-8'))
                     for fila in lector:
                         nombre_corto = fila.get('route_short_name', '').strip()
-                        mapa_rutas[fila['route_id']] = f"Línea {nombre_corto}" if nombre_corto else "Línea Desconocida"
+                        mapa_rutas[fila['route_id']] = f"Línea {nombre_corto}" if nombre_corto else ""
 
-            logging.info("Descargando radar de autobuses (Realtime)...")
             rt_res = requests.get(urls['urlRealTime'], timeout=30)
             feed = gtfs_realtime_pb2.FeedMessage()
             feed.ParseFromString(rt_res.content)
             
-            estadisticas = {}
+            hora_cdmx = (datetime.datetime.utcnow() - datetime.timedelta(hours=6)).hour
+            es_manana = hora_cdmx < 12 
+
+            if es_manana:
+                estacion = "Indios Verdes"
+                destino = "Poliforum"
+                lat_origen, lon_origen = 19.4954, -99.1195
+            else:
+                estacion = "Poliforum"
+                destino = "Indios Verdes"
+                lat_origen, lon_origen = 19.3946, -99.1746
+
+            buses_utiles = []
+            
             for entidad in feed.entity:
                 if entidad.vehicle.HasField("trip") and entidad.vehicle.HasField("position"):
                     r_id = entidad.vehicle.trip.route_id
-                    nombre_linea = mapa_rutas.get(r_id, "Línea Desconocida")
                     
-                    if nombre_linea not in estadisticas:
-                        estadisticas[nombre_linea] = {"total": 0, "detenidos": 0}
+                    if mapa_rutas.get(r_id) == "Línea 1":
+                        lat_bus = entidad.vehicle.position.latitude
+                        lon_bus = entidad.vehicle.position.longitude
+                        bearing = entidad.vehicle.position.bearing 
                         
-                    estadisticas[nombre_linea]["total"] += 1
+                        distancia = self.calcular_distancia(lat_origen, lon_origen, lat_bus, lon_bus)
+                        
+                        if es_manana:
+                            if distancia <= 1.5:
+                                buses_utiles.append(distancia)
+                        else:
+                            va_al_norte = (bearing < 90 or bearing > 270)
+                            esta_al_sur = lat_bus < lat_origen
+                            
+                            if va_al_norte and esta_al_sur and distancia <= 6.0:
+                                buses_utiles.append(distancia)
+
+            buses_utiles.sort()
+            
+            titulo = f"🎯 *ASISTENTE PERSONAL (GPS en vivo)*\n_Tu viaje: {estacion} ➔ {destino}_\n"
+            
+            if es_manana:
+                cantidad = len(buses_utiles)
+                if cantidad >= 4:
+                    estado = "🟢 Excelente (Línea fluyendo)"
+                elif cantidad >= 2:
+                    estado = "🟡 Normal"
+                else:
+                    estado = "🔴 Baja disponibilidad (Posible retraso para abordar)"
                     
-                    if entidad.vehicle.position.speed == 0:
-                        estadisticas[nombre_linea]["detenidos"] += 1
-
-            alertas_radar = []
-            for linea in sorted(estadisticas.keys()):
-                stats = estadisticas[linea]
-                if stats["detenidos"] >= 6 and linea != "Línea Desconocida":
-                    alertas_radar.append(f"- 📡 *{linea}*: {stats['detenidos']} de {stats['total']} autobuses sin movimiento.")
-
-            if alertas_radar:
-                return "🚦 *RADAR EN VIVO (GPS):*\n_Anomalías de tráfico detectadas_\n" + "\n".join(alertas_radar)
+                return titulo + f"Terminal: {estado} ({cantidad} unidades en zona de abordaje)."
+                
             else:
-                return "🚦 *RADAR EN VIVO (GPS):* Flujo vehicular normal en todas las líneas."
+                if not buses_utiles:
+                    return titulo + "⚠️ No se detectan unidades acercándose en 6km. Fuerte retraso en Línea 1."
+                    
+                el_proximo = buses_utiles[0]
+                tiempo_min = max(1, int(el_proximo * 3.75)) 
+                
+                msg = titulo + f"🚌 *Próximo Metrobús:* A {el_proximo:.1f} km de distancia.\n"
+                msg += f"⏱️ *Llegada estimada:* ~{tiempo_min} minutos.\n"
+                msg += f"📊 Vienen {len(buses_utiles)} unidades más en camino (radio de 6km)."
+                return msg
 
         except Exception as e:
-            logging.error(f"Error en Radar GTFS: {str(e)}")
-            return "" 
+            logging.error(f"Error en Asistente GTFS: {str(e)}")
+            return ""
 
     def enviar_reporte_completo(self):
         reporte_oficial = self.obtener_estado_oficial()
-        reporte_radar = self.obtener_radar_gtfs()
+        reporte_asistente = self.obtener_asistente_personal()
         
-        mensaje_final = f"{reporte_oficial}\n\n{reporte_radar}"
+        mensaje_final = f"{reporte_oficial}"
+        if reporte_asistente:
+            mensaje_final += f"\n\n{reporte_asistente}"
         
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
             logging.error("ERROR CRÍTICO: Faltan credenciales de Telegram.")
