@@ -14,6 +14,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 USUARIO = os.getenv("USUARIO_API_KEY")
 SENHA = os.getenv("SENHA_API_KEY")
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -23,7 +24,6 @@ class MetrobusMonitor:
 
     @staticmethod
     def calcular_distancia(lat1, lon1, lat2, lon2):
-        """Calcula la distancia en línea recta (en km) entre dos coordenadas usando la fórmula de Haversine."""
         R = 6371.0 
         dlat = math.radians(lat2 - lat1)
         dlon = math.radians(lon2 - lon1)
@@ -31,8 +31,37 @@ class MetrobusMonitor:
         c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
         return R * c
 
+    def obtener_clima(self) -> str:
+        """Consulta si hay lluvia exactamente en tu estación de origen"""
+        if not OPENWEATHER_API_KEY:
+            return ""
+
+        hora_cdmx = (datetime.datetime.utcnow() - datetime.timedelta(hours=6)).hour
+        es_manana = hora_cdmx < 12 
+        
+        # Coordenadas exactas de tu punto de abordaje
+        lat = 19.4954 if es_manana else 19.3946
+        lon = -99.1195 if es_manana else -99.1746
+
+        try:
+            url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}&lang=es&units=metric"
+            res = requests.get(url, timeout=10)
+            res.raise_for_status()
+            data = res.json()
+            
+            weather_id = data['weather'][0]['id']
+            
+            # Códigos menores a 700 en OpenWeather indican precipitación (lluvia, tormenta, etc.)
+            if weather_id < 700:
+                desc = data['weather'][0]['description'].capitalize()
+                return f"🌧️ *ALERTA METEOROLÓGICA*\n_Clima en tu zona:_ {desc}. Se activa marcha de seguridad. Considera +15 min en tu traslado."
+            
+            return ""
+        except Exception as e:
+            logging.error(f"Error consultando OpenWeather: {str(e)}")
+            return ""
+
     def obtener_estado_oficial(self) -> str:
-        """Extrae las alertas oficiales de la web del gobierno"""
         if not SCRAPER_API_KEY:
             return "Error: Falta la clave de ScraperAPI."
 
@@ -85,7 +114,6 @@ class MetrobusMonitor:
             return f"Error en extracción SEMOVI: {str(e)}"
 
     def procesar_datos_gtfs(self) -> tuple:
-        """Calcula el asistente personal, el termómetro direccional y los hotspots usando una sola descarga"""
         if not USUARIO or not SENHA:
             return "", "", ""
 
@@ -97,7 +125,6 @@ class MetrobusMonitor:
             auth_res.raise_for_status()
             urls = auth_res.json()
             
-            # 1. Mapeo estático (Rutas y Estaciones)
             zip_res = requests.get(urls['urlStatic'], timeout=30)
             mapa_rutas = {}
             mapa_paradas = []
@@ -117,12 +144,10 @@ class MetrobusMonitor:
                             'lon': float(fila['stop_lon'])
                         })
 
-            # 2. Descarga del radar en vivo
             rt_res = requests.get(urls['urlRealTime'], timeout=30)
             feed = gtfs_realtime_pb2.FeedMessage()
             feed.ParseFromString(rt_res.content)
             
-            # --- PREPARACIÓN DE DATOS ---
             hora_cdmx = (datetime.datetime.utcnow() - datetime.timedelta(hours=6)).hour
             es_manana = hora_cdmx < 12 
 
@@ -157,7 +182,6 @@ class MetrobusMonitor:
                         'bearing': bearing
                     })
                     
-                    # Filtramos exclusivamente la Línea 1 para el Asistente
                     if nombre_linea == "Línea 1":
                         lat_bus = entidad.vehicle.position.latitude
                         lon_bus = entidad.vehicle.position.longitude
@@ -195,13 +219,11 @@ class MetrobusMonitor:
                     reporte_asistente = titulo_asis + f"🚌 *Próximo Metrobús:* A {el_proximo:.1f} km.\n⏱️ *Llegada estimada:* ~{tiempo_min} minutos.\n📊 Vienen {len(buses_utiles)} unidades más en camino (radio 6km)."
 
 
-            # --- LÓGICA OPCIÓN 3: TERMÓMETRO DE LÍNEA DIRECCIONAL ---
+            # --- LÓGICA OPCIÓN 3: TERMÓMETRO DIRECCIONAL ---
             reporte_termometro = ""
             buses_l1 = buses_por_ruta.get("Línea 1", [])
             
             if buses_l1:
-                # Aplicamos el Filtro de Anomalías (ignoramos velocidades > 65 km/h)
-                # Y dividimos por dirección usando los grados del satélite
                 buses_norte = [b for b in buses_l1 if (b['bearing'] < 90 or b['bearing'] > 270) and b['speed'] <= 65.0]
                 buses_sur = [b for b in buses_l1 if (90 <= b['bearing'] <= 270) and b['speed'] <= 65.0]
                 
@@ -251,7 +273,6 @@ class MetrobusMonitor:
                             cluster.append(bus_destino)
                             
                     if len(cluster) >= 4:
-                        # También aplicamos el filtro de velocidad para los hotspots
                         cluster_valido = [b for b in cluster if b['speed'] <= 65.0]
                         if not cluster_valido:
                             continue
@@ -288,10 +309,13 @@ class MetrobusMonitor:
 
     def enviar_reporte_completo(self):
         reporte_oficial = self.obtener_estado_oficial()
+        reporte_clima = self.obtener_clima()
         reporte_asistente, reporte_termometro, reporte_hotspots = self.procesar_datos_gtfs()
         
         # Ensamblamos el mensaje
         mensaje_final = f"{reporte_oficial}"
+        if reporte_clima:
+            mensaje_final += f"\n\n{reporte_clima}"
         if reporte_asistente:
             mensaje_final += f"\n\n{reporte_asistente}"
         if reporte_termometro:
