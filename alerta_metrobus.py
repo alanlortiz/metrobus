@@ -21,6 +21,21 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 class MetrobusMonitor:
     def __init__(self, url_semovi: str):
         self.url_semovi = url_semovi
+        
+        # MEMORIA DE MINERÍA DE DATOS
+        tiempo_cdmx = datetime.datetime.utcnow() - datetime.timedelta(hours=6)
+        self.datos_historicos = {
+            "Fecha": tiempo_cdmx.strftime("%Y-%m-%d"),
+            "Hora": tiempo_cdmx.strftime("%H:%M"),
+            "Turno": "Mañana" if tiempo_cdmx.hour < 12 else "Tarde",
+            "Falla_Oficial": 0,
+            "Lluvia": 0,
+            "ETA_Minutos": 0,
+            "Unidades_Cercanas": 0,
+            "Velocidad_Norte": 0.0,
+            "Velocidad_Sur": 0.0,
+            "Hotspots_L1": 0
+        }
 
     @staticmethod
     def calcular_distancia(lat1, lon1, lat2, lon2):
@@ -32,14 +47,10 @@ class MetrobusMonitor:
         return R * c
 
     def obtener_clima(self) -> str:
-        """Consulta si hay lluvia exactamente en tu estación de origen"""
         if not OPENWEATHER_API_KEY:
             return ""
 
-        hora_cdmx = (datetime.datetime.utcnow() - datetime.timedelta(hours=6)).hour
-        es_manana = hora_cdmx < 12 
-        
-        # Coordenadas exactas de tu punto de abordaje
+        es_manana = self.datos_historicos["Turno"] == "Mañana"
         lat = 19.4954 if es_manana else 19.3946
         lon = -99.1195 if es_manana else -99.1746
 
@@ -50,9 +61,8 @@ class MetrobusMonitor:
             data = res.json()
             
             weather_id = data['weather'][0]['id']
-            
-            # Códigos menores a 700 en OpenWeather indican precipitación (lluvia, tormenta, etc.)
             if weather_id < 700:
+                self.datos_historicos["Lluvia"] = 1  # Registro para minería
                 desc = data['weather'][0]['description'].capitalize()
                 return f"🌧️ *ALERTA METEOROLÓGICA*\n_Clima en tu zona:_ {desc}. Se activa marcha de seguridad. Considera +15 min en tu traslado."
             
@@ -108,7 +118,10 @@ class MetrobusMonitor:
                                     reporte_linea += f" | Info: {info_adicional}"
                                 problemas.append(reporte_linea)
             
-            return "Servicio Regular. Todo en orden." if not problemas else "*AFECTACIONES DETECTADAS (Oficial):*\n" + "\n".join(problemas)
+            if problemas:
+                self.datos_historicos["Falla_Oficial"] = 1 # Registro para minería
+                return "*AFECTACIONES DETECTADAS (Oficial):*\n" + "\n".join(problemas)
+            return "Servicio Regular. Todo en orden."
 
         except Exception as e:
             return f"Error en extracción SEMOVI: {str(e)}"
@@ -126,8 +139,7 @@ class MetrobusMonitor:
             urls = auth_res.json()
             
             zip_res = requests.get(urls['urlStatic'], timeout=30)
-            mapa_rutas = {}
-            mapa_paradas = []
+            mapa_rutas, mapa_paradas = {}, []
             
             with zipfile.ZipFile(io.BytesIO(zip_res.content)) as z:
                 with z.open('routes.txt') as f:
@@ -148,8 +160,7 @@ class MetrobusMonitor:
             feed = gtfs_realtime_pb2.FeedMessage()
             feed.ParseFromString(rt_res.content)
             
-            hora_cdmx = (datetime.datetime.utcnow() - datetime.timedelta(hours=6)).hour
-            es_manana = hora_cdmx < 12 
+            es_manana = self.datos_historicos["Turno"] == "Mañana"
 
             if es_manana:
                 estacion, destino = "Indios Verdes", "Poliforum"
@@ -158,14 +169,12 @@ class MetrobusMonitor:
                 estacion, destino = "Poliforum", "Indios Verdes"
                 lat_origen, lon_origen = 19.3946, -99.1746
 
-            buses_utiles = []
-            buses_por_ruta = {} 
+            buses_utiles, buses_por_ruta = [], {}
             
             for entidad in feed.entity:
                 if entidad.vehicle.HasField("trip") and entidad.vehicle.HasField("position"):
                     r_id = entidad.vehicle.trip.route_id
                     nombre_linea = mapa_rutas.get(r_id, "Línea Desconocida")
-                    
                     if not nombre_linea: continue
 
                     velocidad_kmh = entidad.vehicle.position.speed * 3.6
@@ -185,7 +194,6 @@ class MetrobusMonitor:
                     if nombre_linea == "Línea 1":
                         lat_bus = entidad.vehicle.position.latitude
                         lon_bus = entidad.vehicle.position.longitude
-                        
                         distancia = self.calcular_distancia(lat_origen, lon_origen, lat_bus, lon_bus)
                         
                         if es_manana:
@@ -197,12 +205,13 @@ class MetrobusMonitor:
                             if va_al_norte and esta_al_sur and distancia <= 6.0:
                                 buses_utiles.append(distancia)
 
-            # --- LÓGICA OPCIÓN 1: ASISTENTE PERSONAL ---
+            # 1. ASISTENTE PERSONAL
             buses_utiles.sort()
             titulo_asis = f"🎯 *ASISTENTE PERSONAL (GPS)*\n_Tu viaje: {estacion} ➔ {destino}_\n"
             
             if es_manana:
                 cantidad = len(buses_utiles)
+                self.datos_historicos["Unidades_Cercanas"] = cantidad
                 if cantidad >= 4:
                     estado = "🟢 Excelente (Línea fluyendo)"
                 elif cantidad >= 2:
@@ -211,15 +220,16 @@ class MetrobusMonitor:
                     estado = "🔴 Baja disponibilidad (Posible retraso)"
                 reporte_asistente = titulo_asis + f"Terminal: {estado} ({cantidad} unidades listas)."
             else:
+                self.datos_historicos["Unidades_Cercanas"] = len(buses_utiles)
                 if not buses_utiles:
                     reporte_asistente = titulo_asis + "⚠️ No hay unidades acercándose en 6km. Fuerte retraso."
                 else:
                     el_proximo = buses_utiles[0]
                     tiempo_min = max(1, int(el_proximo * 3.75)) 
+                    self.datos_historicos["ETA_Minutos"] = tiempo_min
                     reporte_asistente = titulo_asis + f"🚌 *Próximo Metrobús:* A {el_proximo:.1f} km.\n⏱️ *Llegada estimada:* ~{tiempo_min} minutos.\n📊 Vienen {len(buses_utiles)} unidades más en camino (radio 6km)."
 
-
-            # --- LÓGICA OPCIÓN 3: TERMÓMETRO DIRECCIONAL ---
+            # 2. TERMÓMETRO DIRECCIONAL
             reporte_termometro = ""
             buses_l1 = buses_por_ruta.get("Línea 1", [])
             
@@ -228,18 +238,17 @@ class MetrobusMonitor:
                 buses_sur = [b for b in buses_l1 if (90 <= b['bearing'] <= 270) and b['speed'] <= 65.0]
                 
                 def evaluar_estado_velocidad(buses_filtrados):
-                    if not buses_filtrados:
-                        return "⚪ Sin datos", 0.0
+                    if not buses_filtrados: return "⚪ Sin datos", 0.0
                     avg_speed = sum(b['speed'] for b in buses_filtrados) / len(buses_filtrados)
-                    if avg_speed >= 14.0:
-                        return "🟢 Fluido", avg_speed
-                    elif avg_speed >= 10.0:
-                        return "🟡 Moderado", avg_speed
-                    else:
-                        return "🔴 Tráfico Pesado", avg_speed
+                    if avg_speed >= 14.0: return "🟢 Fluido", avg_speed
+                    elif avg_speed >= 10.0: return "🟡 Moderado", avg_speed
+                    else: return "🔴 Tráfico Pesado", avg_speed
 
                 estado_norte, vel_norte = evaluar_estado_velocidad(buses_norte)
                 estado_sur, vel_sur = evaluar_estado_velocidad(buses_sur)
+                
+                self.datos_historicos["Velocidad_Norte"] = round(vel_norte, 1)
+                self.datos_historicos["Velocidad_Sur"] = round(vel_sur, 1)
                     
                 reporte_termometro = (
                     "🌡️ *TERMÓMETRO DE RUTA (L1)*\n"
@@ -247,8 +256,7 @@ class MetrobusMonitor:
                     f"⬇️ *Sur (Caminero):* {estado_sur} ({vel_sur:.1f} km/h)"
                 )
 
-
-            # --- LÓGICA OPCIÓN 2: HOTSPOTS (Embotellamientos) ---
+            # 3. HOTSPOTS (Embotellamientos)
             hotspots_msg = []
             terminales_ignoradas = ["indios verdes", "caminero", "gálvez", "colonia del valle", 
                                     "tepalcates", "tacubaya", "etiopía", "tenayuca", "santa cruz atoyac", 
@@ -256,29 +264,23 @@ class MetrobusMonitor:
                                     "remedios", "preparatoria 1", "rosario", "villa de aragón", "hospital infantil", "campo marte"]
 
             for linea, lista_buses in buses_por_ruta.items():
-                if linea != "Línea 1":
-                    continue
-
+                if linea != "Línea 1": continue
                 buses_procesados = set()
                 
                 for i, bus_origen in enumerate(lista_buses):
                     if bus_origen['id'] in buses_procesados: continue
-                    
                     cluster = [bus_origen]
                     for j, bus_destino in enumerate(lista_buses):
                         if i == j or bus_destino['id'] in buses_procesados: continue
-                        
                         dist = self.calcular_distancia(bus_origen['lat'], bus_origen['lon'], bus_destino['lat'], bus_destino['lon'])
                         if dist <= 0.4:
                             cluster.append(bus_destino)
                             
                     if len(cluster) >= 4:
                         cluster_valido = [b for b in cluster if b['speed'] <= 65.0]
-                        if not cluster_valido:
-                            continue
+                        if not cluster_valido: continue
                             
                         avg_speed = sum(b['speed'] for b in cluster_valido) / len(cluster_valido)
-                        
                         if avg_speed < 12.0: 
                             centro_lat = sum(b['lat'] for b in cluster_valido) / len(cluster_valido)
                             centro_lon = sum(b['lon'] for b in cluster_valido) / len(cluster_valido)
@@ -291,15 +293,13 @@ class MetrobusMonitor:
                                     min_dist = d
                                     estacion_cercana = parada['nombre']
                             
-                            es_terminal = any(t in estacion_cercana.lower() for t in terminales_ignoradas)
-                            
-                            if not es_terminal:
-                                hotspots_msg.append(f"- 🚨 Fuerte aglomeración ({len(cluster_valido)} unidades) cerca de *{estacion_cercana}*. Vel: {avg_speed:.1f} km/h.")
-                                
+                            if not any(t in estacion_cercana.lower() for t in terminales_ignoradas):
+                                hotspots_msg.append(f"- 🚨 Aglomeración ({len(cluster_valido)} unidades) cerca de *{estacion_cercana}*. Vel: {avg_speed:.1f} km/h.")
+                                self.datos_historicos["Hotspots_L1"] += 1
                                 for b in cluster_valido:
                                     buses_procesados.add(b['id'])
 
-            reporte_hotspots = "⚠️ *ALERTAS DE TRÁFICO EN VIVO (Hotspots Línea 1)*\n" + "\n".join(hotspots_msg) if hotspots_msg else ""
+            reporte_hotspots = "⚠️ *ALERTAS DE TRÁFICO (Hotspots L1)*\n" + "\n".join(hotspots_msg) if hotspots_msg else ""
 
             return reporte_asistente, reporte_termometro, reporte_hotspots
 
@@ -307,38 +307,45 @@ class MetrobusMonitor:
             logging.error(f"Error en procesamiento GTFS: {str(e)}")
             return "", "", ""
 
+    def guardar_registro_csv(self):
+        """Guarda la memoria de la ejecución en un archivo CSV local"""
+        nombre_archivo = "historial_metrobus.csv"
+        archivo_existe = os.path.isfile(nombre_archivo)
+        
+        try:
+            with open(nombre_archivo, mode='a', newline='', encoding='utf-8') as archivo:
+                escritor = csv.DictWriter(archivo, fieldnames=self.datos_historicos.keys())
+                if not archivo_existe:
+                    escritor.writeheader()
+                escritor.writerow(self.datos_historicos)
+            logging.info("Registro guardado exitosamente en CSV local.")
+        except Exception as e:
+            logging.error(f"Error al guardar el CSV: {str(e)}")
+
     def enviar_reporte_completo(self):
         reporte_oficial = self.obtener_estado_oficial()
         reporte_clima = self.obtener_clima()
         reporte_asistente, reporte_termometro, reporte_hotspots = self.procesar_datos_gtfs()
         
-        # Ensamblamos el mensaje
+        # Guarda los datos independientemente de si falla Telegram o no
+        self.guardar_registro_csv()
+        
         mensaje_final = f"{reporte_oficial}"
-        if reporte_clima:
-            mensaje_final += f"\n\n{reporte_clima}"
-        if reporte_asistente:
-            mensaje_final += f"\n\n{reporte_asistente}"
-        if reporte_termometro:
-            mensaje_final += f"\n\n{reporte_termometro}"
-        if reporte_hotspots:
-            mensaje_final += f"\n\n{reporte_hotspots}"
+        if reporte_clima: mensaje_final += f"\n\n{reporte_clima}"
+        if reporte_asistente: mensaje_final += f"\n\n{reporte_asistente}"
+        if reporte_termometro: mensaje_final += f"\n\n{reporte_termometro}"
+        if reporte_hotspots: mensaje_final += f"\n\n{reporte_hotspots}"
         
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-            logging.error("ERROR CRÍTICO: Faltan credenciales de Telegram.")
+            logging.error("Faltan credenciales de Telegram.")
             exit(1)
             
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": f"🚇 *REPORTE METROBÚS*\n\n{mensaje_final}",
-            "parse_mode": "Markdown"
-        }
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🚇 *REPORTE METROBÚS*\n\n{mensaje_final}", "parse_mode": "Markdown"}
         
         try:
-            logging.info("Enviando reporte a Telegram...")
-            respuesta = requests.post(url, json=payload, timeout=15)
-            respuesta.raise_for_status()
-            logging.info("✅ Telegram enviado correctamente.")
+            requests.post(url, json=payload, timeout=15).raise_for_status()
+            logging.info("Telegram enviado correctamente.")
         except requests.exceptions.RequestException as e:
             logging.error(f"Error al enviar Telegram: {str(e)}")
             exit(1)
