@@ -103,13 +103,11 @@ class MetrobusMonitor:
             mapa_paradas = []
             
             with zipfile.ZipFile(io.BytesIO(zip_res.content)) as z:
-                # Rutas
                 with z.open('routes.txt') as f:
                     lector_rutas = csv.DictReader(io.TextIOWrapper(f, 'utf-8'))
                     for fila in lector_rutas:
                         nombre_corto = fila.get('route_short_name', '').strip()
                         mapa_rutas[fila['route_id']] = f"Línea {nombre_corto}" if nombre_corto else ""
-                # Paradas
                 with z.open('stops.txt') as f:
                     lector_paradas = csv.DictReader(io.TextIOWrapper(f, 'utf-8'))
                     for fila in lector_paradas:
@@ -119,10 +117,12 @@ class MetrobusMonitor:
                             'lon': float(fila['stop_lon'])
                         })
 
+            # 2. Descarga del radar en vivo
             rt_res = requests.get(urls['urlRealTime'], timeout=30)
             feed = gtfs_realtime_pb2.FeedMessage()
             feed.ParseFromString(rt_res.content)
             
+            # --- LÓGICA OPCIÓN 1: ASISTENTE PERSONAL ---
             hora_cdmx = (datetime.datetime.utcnow() - datetime.timedelta(hours=6)).hour
             es_manana = hora_cdmx < 12 
 
@@ -134,7 +134,7 @@ class MetrobusMonitor:
                 lat_origen, lon_origen = 19.3946, -99.1746
 
             buses_utiles = []
-            buses_por_ruta = {}
+            buses_por_ruta = {} 
             
             for entidad in feed.entity:
                 if entidad.vehicle.HasField("trip") and entidad.vehicle.HasField("position"):
@@ -170,6 +170,7 @@ class MetrobusMonitor:
                             if va_al_norte and esta_al_sur and distancia <= 6.0:
                                 buses_utiles.append(distancia)
 
+            # Generar texto Opción 1
             buses_utiles.sort()
             titulo_asis = f"🎯 *ASISTENTE PERSONAL (GPS)*\n_Tu viaje: {estacion} ➔ {destino}_\n"
             
@@ -191,6 +192,7 @@ class MetrobusMonitor:
                     reporte_asistente = titulo_asis + f"🚌 *Próximo Metrobús:* A {el_proximo:.1f} km.\n⏱️ *Llegada estimada:* ~{tiempo_min} minutos.\n📊 Vienen {len(buses_utiles)} unidades más en camino (radio 6km)."
 
 
+            # --- LÓGICA OPCIÓN 2: HOTSPOTS (Embotellamientos) ---
             hotspots_msg = []
             terminales_ignoradas = ["indios verdes", "caminero", "gálvez", "colonia del valle", 
                                     "tepalcates", "tacubaya", "etiopía", "tenayuca", "santa cruz atoyac", 
@@ -198,6 +200,10 @@ class MetrobusMonitor:
                                     "remedios", "preparatoria 1", "rosario", "villa de aragón", "hospital infantil", "campo marte"]
 
             for linea, lista_buses in buses_por_ruta.items():
+                # FILTRO APLICADO: Si no es la Línea 1, saltamos a la siguiente línea
+                if linea != "Línea 1":
+                    continue
+
                 buses_procesados = set()
                 
                 for i, bus_origen in enumerate(lista_buses):
