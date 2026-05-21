@@ -31,4 +31,6 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+          USUARIO_API_KEY: ${{ secrets.USUARIO_API_KEY }}
+          SENHA_API_KEY: ${{ secrets.SENHA_API_KEY }}
         run: python alerta_metrobus.py
