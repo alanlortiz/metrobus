@@ -85,9 +85,9 @@ class MetrobusMonitor:
             return f"Error en extracción SEMOVI: {str(e)}"
 
     def procesar_datos_gtfs(self) -> tuple:
-        """Calcula tu asistente personal y busca embotellamientos usando una sola descarga de datos"""
+        """Calcula el asistente personal, el termómetro y los hotspots usando una sola descarga"""
         if not USUARIO or not SENHA:
-            return "", ""
+            return "", "", ""
 
         try:
             url_auth = "https://metrobus-gtfs.sinopticoplus.com/gtfs-api/partnerValidation"
@@ -97,7 +97,6 @@ class MetrobusMonitor:
             auth_res.raise_for_status()
             urls = auth_res.json()
             
-            # 1. Mapeo estático (Rutas y Estaciones)
             zip_res = requests.get(urls['urlStatic'], timeout=30)
             mapa_rutas = {}
             mapa_paradas = []
@@ -117,12 +116,10 @@ class MetrobusMonitor:
                             'lon': float(fila['stop_lon'])
                         })
 
-            # 2. Descarga del radar en vivo
             rt_res = requests.get(urls['urlRealTime'], timeout=30)
             feed = gtfs_realtime_pb2.FeedMessage()
             feed.ParseFromString(rt_res.content)
             
-            # --- LÓGICA OPCIÓN 1: ASISTENTE PERSONAL ---
             hora_cdmx = (datetime.datetime.utcnow() - datetime.timedelta(hours=6)).hour
             es_manana = hora_cdmx < 12 
 
@@ -170,7 +167,6 @@ class MetrobusMonitor:
                             if va_al_norte and esta_al_sur and distancia <= 6.0:
                                 buses_utiles.append(distancia)
 
-            # Generar texto Opción 1
             buses_utiles.sort()
             titulo_asis = f"🎯 *ASISTENTE PERSONAL (GPS)*\n_Tu viaje: {estacion} ➔ {destino}_\n"
             
@@ -192,7 +188,22 @@ class MetrobusMonitor:
                     reporte_asistente = titulo_asis + f"🚌 *Próximo Metrobús:* A {el_proximo:.1f} km.\n⏱️ *Llegada estimada:* ~{tiempo_min} minutos.\n📊 Vienen {len(buses_utiles)} unidades más en camino (radio 6km)."
 
 
-            # --- LÓGICA OPCIÓN 2: HOTSPOTS (Embotellamientos) ---
+            reporte_termometro = ""
+            buses_l1 = buses_por_ruta.get("Línea 1", [])
+            
+            if buses_l1:
+                avg_speed_l1 = sum(b['speed'] for b in buses_l1) / len(buses_l1)
+                
+                if avg_speed_l1 >= 14.0:
+                    estado_term = "🟢 Fluido"
+                elif avg_speed_l1 >= 10.0:
+                    estado_term = "🟡 Moderado"
+                else:
+                    estado_term = "🔴 Tráfico Pesado"
+                    
+                reporte_termometro = f"🌡️ *TERMÓMETRO DE RUTA*\n- *Línea 1*: {estado_term} (Vel. promedio: {avg_speed_l1:.1f} km/h)"
+
+
             hotspots_msg = []
             terminales_ignoradas = ["indios verdes", "caminero", "gálvez", "colonia del valle", 
                                     "tepalcates", "tacubaya", "etiopía", "tenayuca", "santa cruz atoyac", 
@@ -200,7 +211,6 @@ class MetrobusMonitor:
                                     "remedios", "preparatoria 1", "rosario", "villa de aragón", "hospital infantil", "campo marte"]
 
             for linea, lista_buses in buses_por_ruta.items():
-                # FILTRO APLICADO: Si no es la Línea 1, saltamos a la siguiente línea
                 if linea != "Línea 1":
                     continue
 
@@ -235,26 +245,28 @@ class MetrobusMonitor:
                             es_terminal = any(t in estacion_cercana.lower() for t in terminales_ignoradas)
                             
                             if not es_terminal:
-                                hotspots_msg.append(f"- 🚨 *{linea}*: Fuerte aglomeración ({len(cluster)} autobuses) cerca de *{estacion_cercana}*. Vel. Promedio: {avg_speed:.1f} km/h.")
+                                hotspots_msg.append(f"- 🚨 Fuerte aglomeración ({len(cluster)} unidades) cerca de *{estacion_cercana}*. Vel: {avg_speed:.1f} km/h.")
                                 
                                 for b in cluster:
                                     buses_procesados.add(b['id'])
 
-            reporte_hotspots = "⚠️ *ALERTAS DE TRÁFICO EN VIVO (Hotspots)*\n" + "\n".join(hotspots_msg) if hotspots_msg else ""
+            reporte_hotspots = "⚠️ *ALERTAS DE TRÁFICO EN VIVO (Hotspots Línea 1)*\n" + "\n".join(hotspots_msg) if hotspots_msg else ""
 
-            return reporte_asistente, reporte_hotspots
+            return reporte_asistente, reporte_termometro, reporte_hotspots
 
         except Exception as e:
             logging.error(f"Error en procesamiento GTFS: {str(e)}")
-            return "", ""
+            return "", "", ""
 
     def enviar_reporte_completo(self):
         reporte_oficial = self.obtener_estado_oficial()
-        reporte_asistente, reporte_hotspots = self.procesar_datos_gtfs()
+        reporte_asistente, reporte_termometro, reporte_hotspots = self.procesar_datos_gtfs()
         
         mensaje_final = f"{reporte_oficial}"
         if reporte_asistente:
             mensaje_final += f"\n\n{reporte_asistente}"
+        if reporte_termometro:
+            mensaje_final += f"\n\n{reporte_termometro}"
         if reporte_hotspots:
             mensaje_final += f"\n\n{reporte_hotspots}"
         
