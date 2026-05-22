@@ -22,7 +22,6 @@ class MetrobusMonitor:
     def __init__(self, url_semovi: str):
         self.url_semovi = url_semovi
         
-        # MEMORIA DE MINERÍA DE DATOS
         tiempo_cdmx = datetime.datetime.utcnow() - datetime.timedelta(hours=6)
         self.datos_historicos = {
             "Fecha": tiempo_cdmx.strftime("%Y-%m-%d"),
@@ -36,6 +35,41 @@ class MetrobusMonitor:
             "Velocidad_Sur": 0.0,
             "Hotspots_L1": 0
         }
+
+    # ESCUDO ANTIRREBOTE
+    def ejecucion_reciente(self) -> bool:
+        """Verifica si el script ya envió un reporte en los últimos 3 minutos"""
+        nombre_archivo = "historial_metrobus.csv"
+        if not os.path.isfile(nombre_archivo):
+            return False
+
+        try:
+            with open(nombre_archivo, mode='r', encoding='utf-8') as archivo:
+                lector = csv.DictReader(archivo)
+                filas = list(lector)
+                if not filas:
+                    return False
+                
+                ultima_fila = filas[-1]
+                fecha_str = ultima_fila.get("Fecha")
+                hora_str = ultima_fila.get("Hora")
+                
+                if not fecha_str or not hora_str:
+                    return False
+
+                ultima_ejecucion = datetime.datetime.strptime(f"{fecha_str} {hora_str}", "%Y-%m-%d %H:%M")
+                tiempo_cdmx = datetime.datetime.utcnow() - datetime.timedelta(hours=6)
+                
+                minutos_diferencia = (tiempo_cdmx - ultima_ejecucion).total_seconds() / 60.0
+                
+                # Si han pasado menos de 3 minutos, es un rebote de Telegram
+                if minutos_diferencia < 3.0:
+                    return True
+                    
+        except Exception as e:
+            logging.error(f"Error comprobando historial antirrebote: {str(e)}")
+            
+        return False
 
     @staticmethod
     def calcular_distancia(lat1, lon1, lat2, lon2):
@@ -62,7 +96,7 @@ class MetrobusMonitor:
             
             weather_id = data['weather'][0]['id']
             if weather_id < 700:
-                self.datos_historicos["Lluvia"] = 1  # Registro para minería
+                self.datos_historicos["Lluvia"] = 1  
                 desc = data['weather'][0]['description'].capitalize()
                 return f"🌧️ *ALERTA METEOROLÓGICA*\n_Clima en tu zona:_ {desc}. Se activa marcha de seguridad. Considera +15 min en tu traslado."
             
@@ -119,7 +153,7 @@ class MetrobusMonitor:
                                 problemas.append(reporte_linea)
             
             if problemas:
-                self.datos_historicos["Falla_Oficial"] = 1 # Registro para minería
+                self.datos_historicos["Falla_Oficial"] = 1 
                 return "*AFECTACIONES DETECTADAS (Oficial):*\n" + "\n".join(problemas)
             return "Servicio Regular. Todo en orden."
 
@@ -308,7 +342,6 @@ class MetrobusMonitor:
             return "", "", ""
 
     def guardar_registro_csv(self):
-        """Guarda la memoria de la ejecución en un archivo CSV local"""
         nombre_archivo = "historial_metrobus.csv"
         archivo_existe = os.path.isfile(nombre_archivo)
         
@@ -323,11 +356,15 @@ class MetrobusMonitor:
             logging.error(f"Error al guardar el CSV: {str(e)}")
 
     def enviar_reporte_completo(self):
+        # ACTIVACIÓN DEL ESCUDO ANTIRREBOTE
+        if self.ejecucion_reciente():
+            logging.info("🛑 Petición ignorada: Telegram envió un rebote duplicado (Filtro Antirrebote activado).")
+            return # El código se rinde pacíficamente y no manda spam a tu teléfono
+
         reporte_oficial = self.obtener_estado_oficial()
         reporte_clima = self.obtener_clima()
         reporte_asistente, reporte_termometro, reporte_hotspots = self.procesar_datos_gtfs()
         
-        # Guarda los datos independientemente de si falla Telegram o no
         self.guardar_registro_csv()
         
         mensaje_final = f"{reporte_oficial}"
