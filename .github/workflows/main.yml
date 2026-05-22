@@ -2,21 +2,26 @@ name: Monitor Metrobus CDMX
 
 on:
   schedule:
-    - cron: '30 10 * * 1-5' # Mañana
-    - cron: '20 22 * * 1-5' # Tarde
+    - cron: '30 10 * * 1-5'
+    - cron: '30 22 * * 1-5'
   workflow_dispatch: 
+
+concurrency:
+  group: metrobus-bot
+  cancel-in-progress: false
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
     
-    # ⚠️ IMPORTANTE: Permisos para que el bot pueda subir el CSV a tu repositorio
     permissions:
       contents: write 
 
     steps:
       - name: Descargar código
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
 
       - name: Configurar Python
         uses: actions/setup-python@v5
@@ -37,12 +42,15 @@ jobs:
           OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
         run: python alerta_metrobus.py
 
-      # ESTE ES EL PASO NUEVO QUE SUBE EL CSV
       - name: Guardar Historial en Repositorio
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action Bot"
           git add historial_metrobus.csv
-          # El [skip ci] evita que GitHub se trabe en un ciclo infinito de ejecución
+          
+          # Hacemos el commit
           git commit -m "📊 Actualiza historial de datos [skip ci]" || echo "No hay cambios para hacer commit"
+          
+          # 🛡️ BLINDAJE DE GIT: Descarga y fusiona cambios de último milisegundo antes de empujar
+          git pull --rebase origin main
           git push
