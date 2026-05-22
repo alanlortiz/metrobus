@@ -8,7 +8,7 @@ on:
 
 concurrency:
   group: metrobus-bot
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   run-script:
