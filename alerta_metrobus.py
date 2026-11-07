@@ -33,6 +33,11 @@ VEL_MAX_VALIDA_KMH = 65.0
 # Tope y respaldo de velocidad para el ETA (km/h)
 VEL_ETA_TOPE = 16.0
 VEL_ETA_RESPALDO = 12.0
+# Hotspots: N+ unidades del mismo sentido en este radio, con velocidad promedio menor al umbral
+HOTSPOT_RADIO_KM = 0.4
+HOTSPOT_MIN_UNIDADES = 4
+HOTSPOT_VEL_MAX_KMH = 10.0
+HOTSPOT_MAX_MOSTRADOS = 3
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -234,6 +239,78 @@ class MetrobusMonitor:
             logging.error(f"Error en extracción SEMOVI: {e}")
             return f"⚠️ Estado oficial no disponible (SEMOVI): {esc(type(e).__name__)}"
 
+    @staticmethod
+    def _paradas_de_linea(z: zipfile.ZipFile, mapa_rutas: dict, linea: str) -> set:
+        """stop_ids que recorre una línea, vía trips.txt + stop_times.txt (lectura en streaming)."""
+        try:
+            rutas = {rid for rid, nombre in mapa_rutas.items() if nombre == linea}
+            viajes = set()
+            with z.open('trips.txt') as f:
+                for fila in csv.DictReader(io.TextIOWrapper(f, 'utf-8-sig')):
+                    if fila.get('route_id') in rutas:
+                        viajes.add(fila.get('trip_id'))
+            paradas = set()
+            with z.open('stop_times.txt') as f:
+                for fila in csv.DictReader(io.TextIOWrapper(f, 'utf-8-sig')):
+                    if fila.get('trip_id') in viajes:
+                        paradas.add(fila.get('stop_id'))
+            return paradas
+        except Exception as e:
+            logging.warning(f"No se pudieron leer trips/stop_times: {e}")
+            return set()
+
+    def detectar_hotspots(self, buses: list, paradas: list) -> list:
+        """
+        Agrupa buses LENTOS del MISMO sentido que estén a <= HOTSPOT_RADIO_KM entre sí.
+        Cada bus pertenece a un solo cluster, así que no hay hotspots repetidos.
+        Devuelve lista de dicts ordenada por severidad.
+        """
+        terminales_ignoradas = ["indios verdes", "caminero", "gálvez", "galvez"]
+        resultados = []
+
+        for sentido, flecha, filtro in (
+            ("Norte", "⬆️", lambda b: b['bearing'] < 90 or b['bearing'] > 270),
+            ("Sur", "⬇️", lambda b: 90 <= b['bearing'] <= 270),
+        ):
+            candidatos = [b for b in buses
+                          if b['bearing'] is not None and b['speed'] is not None and filtro(b)]
+
+            # Vecinos de cada bus (mismo sentido, dentro del radio)
+            vecinos = {}
+            for b in candidatos:
+                vecinos[b['id']] = [o for o in candidatos
+                                    if self.calcular_distancia(b['lat'], b['lon'], o['lat'], o['lon']) <= HOTSPOT_RADIO_KM]
+
+            # Se siembra primero desde los buses con más vecinos (cluster más denso)
+            asignados = set()
+            for semilla in sorted(candidatos, key=lambda b: -len(vecinos[b['id']])):
+                if semilla['id'] in asignados:
+                    continue
+                cluster = [o for o in vecinos[semilla['id']] if o['id'] not in asignados]
+                if len(cluster) < HOTSPOT_MIN_UNIDADES:
+                    continue
+                for o in cluster:  # se marcan SIEMPRE, sea o no hotspot, para no recontar
+                    asignados.add(o['id'])
+
+                vel_prom = sum(o['speed'] for o in cluster) / len(cluster)
+                if vel_prom >= HOTSPOT_VEL_MAX_KMH:
+                    continue
+
+                c_lat = sum(o['lat'] for o in cluster) / len(cluster)
+                c_lon = sum(o['lon'] for o in cluster) / len(cluster)
+                estacion = min(paradas, key=lambda p: self.calcular_distancia(c_lat, c_lon, p['lat'], p['lon']),
+                               default={'nombre': 'Desconocida'})['nombre']
+
+                if any(t in estacion.lower() for t in terminales_ignoradas):
+                    continue
+
+                resultados.append({'sentido': sentido, 'flecha': flecha, 'estacion': estacion,
+                                   'unidades': len(cluster), 'velocidad': vel_prom})
+
+        # Más severo primero: más unidades y más lento
+        resultados.sort(key=lambda h: (-h['unidades'], h['velocidad']))
+        return resultados
+
     def procesar_datos_gtfs(self) -> tuple:
         if not USUARIO or not SENHA:
             return "", "", ""
@@ -246,7 +323,7 @@ class MetrobusMonitor:
 
             zip_res = self.http.get(urls['urlStatic'], timeout=30)
             zip_res.raise_for_status()
-            mapa_rutas, mapa_paradas = {}, []
+            mapa_rutas, todas_paradas = {}, {}
 
             with zipfile.ZipFile(io.BytesIO(zip_res.content)) as z:
                 with z.open('routes.txt') as f:
@@ -256,13 +333,20 @@ class MetrobusMonitor:
                 with z.open('stops.txt') as f:
                     for fila in csv.DictReader(io.TextIOWrapper(f, 'utf-8-sig')):
                         try:
-                            mapa_paradas.append({
-                                'nombre': fila.get('stop_name', 'Estación Desconocida'),
+                            todas_paradas[fila['stop_id']] = {
+                                'nombre': fila.get('stop_name', 'Estación Desconocida').strip().rstrip('.'),
                                 'lat': float(fila['stop_lat']),
                                 'lon': float(fila['stop_lon'])
-                            })
+                            }
                         except (KeyError, ValueError):
                             continue
+                ids_paradas_l1 = self._paradas_de_linea(z, mapa_rutas, MI_LINEA)
+
+            # Para nombrar hotspots solo se usan estaciones de TU línea (si no se pudo, todas)
+            paradas_l1 = [todas_paradas[s] for s in ids_paradas_l1 if s in todas_paradas]
+            mapa_paradas = paradas_l1 or list(todas_paradas.values())
+            if not paradas_l1:
+                logging.warning("No se pudieron identificar las paradas de L1; se usan todas las paradas.")
 
             rt_res = self.http.get(urls['urlRealTime'], timeout=30)
             rt_res.raise_for_status()
@@ -392,53 +476,20 @@ class MetrobusMonitor:
                         f"📊 Vienen {restantes} unidades más en camino (radio 6km)."
                     )
 
-            # 3. HOTSPOTS (Embotellamientos)
-            hotspots_msg = []
-            terminales_ignoradas = ["indios verdes", "caminero", "gálvez", "colonia del valle",
-                                    "tepalcates", "tacubaya", "etiopía", "tenayuca", "santa cruz atoyac",
-                                    "balderas", "buenavista", "san lázaro", "pantitlán", "alameda oriente",
-                                    "remedios", "preparatoria 1", "rosario", "villa de aragón", "hospital infantil", "campo marte"]
-
-            buses_procesados = set()
-            for i, bus_origen in enumerate(buses_l1):
-                if bus_origen['id'] in buses_procesados:
-                    continue
-                cluster = [bus_origen]
-                for j, bus_destino in enumerate(buses_l1):
-                    if i == j or bus_destino['id'] in buses_procesados:
-                        continue
-                    dist = self.calcular_distancia(bus_origen['lat'], bus_origen['lon'], bus_destino['lat'], bus_destino['lon'])
-                    if dist <= 0.4:
-                        cluster.append(bus_destino)
-
-                if len(cluster) >= 4:
-                    cluster_valido = [b for b in cluster if b['speed'] is not None]
-                    if not cluster_valido:
-                        continue
-
-                    avg_speed = sum(b['speed'] for b in cluster_valido) / len(cluster_valido)
-                    if avg_speed < 12.0:
-                        centro_lat = sum(b['lat'] for b in cluster_valido) / len(cluster_valido)
-                        centro_lon = sum(b['lon'] for b in cluster_valido) / len(cluster_valido)
-
-                        estacion_cercana = "Desconocida"
-                        min_dist = 999.0
-                        for parada in mapa_paradas:
-                            d = self.calcular_distancia(centro_lat, centro_lon, parada['lat'], parada['lon'])
-                            if d < min_dist:
-                                min_dist = d
-                                estacion_cercana = parada['nombre']
-
-                        if not any(t in estacion_cercana.lower() for t in terminales_ignoradas):
-                            hotspots_msg.append(
-                                f"- 🚨 Aglomeración ({len(cluster_valido)} unidades) cerca de "
-                                f"<b>{esc(estacion_cercana)}</b>. Vel: {avg_speed:.1f} km/h."
-                            )
-                            self.datos_historicos["Hotspots_L1"] += 1
-                            for b in cluster_valido:
-                                buses_procesados.add(b['id'])
-
-            reporte_hotspots = ("⚠️ <b>ALERTAS DE TRÁFICO (Hotspots L1)</b>\n" + "\n".join(hotspots_msg)) if hotspots_msg else ""
+            # 3. HOTSPOTS (Embotellamientos reales: mismo sentido, sin duplicados, solo estaciones L1)
+            hotspots = self.detectar_hotspots(buses_l1, mapa_paradas)
+            self.datos_historicos["Hotspots_L1"] = len(hotspots)
+            reporte_hotspots = ""
+            if hotspots:
+                lineas = [
+                    f"- {h['flecha']} <b>{esc(h['estacion'])}</b> (hacia {'Indios Verdes' if h['sentido'] == 'Norte' else 'el sur'}): "
+                    f"{h['unidades']} unidades a {h['velocidad']:.1f} km/h"
+                    for h in hotspots[:HOTSPOT_MAX_MOSTRADOS]
+                ]
+                extra = len(hotspots) - HOTSPOT_MAX_MOSTRADOS
+                if extra > 0:
+                    lineas.append(f"<i>…y {extra} más.</i>")
+                reporte_hotspots = "⚠️ <b>EMBOTELLAMIENTOS L1</b>\n" + "\n".join(lineas)
 
             if not buses_l1:
                 reporte_asistente = titulo_asis + "⚠️ El GPS no reportó unidades activas de L1 en este momento."
