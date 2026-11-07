@@ -7,10 +7,12 @@ import logging
 import requests
 import zipfile
 import io
+import json
 import csv
 import math
 import datetime
 from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
@@ -38,6 +40,10 @@ HOTSPOT_RADIO_KM = 0.4
 HOTSPOT_MIN_UNIDADES = 4
 HOTSPOT_VEL_MAX_KMH = 10.0
 HOTSPOT_MAX_MOSTRADOS = 3
+# Cache del GTFS estático (rutas + paradas de L1). Se guarda en el repo junto al historial.
+ARCHIVO_CACHE_GTFS = "gtfs_estatico.json"
+GTFS_CACHE_DIAS = 7            # se renueva al menos una vez por semana
+GTFS_RECARGA_MIN_HORAS = 6     # si aparecen rutas desconocidas, renueva solo si la cache tiene más de esto
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -240,6 +246,70 @@ class MetrobusMonitor:
             return f"⚠️ Estado oficial no disponible (SEMOVI): {esc(type(e).__name__)}"
 
     @staticmethod
+    def cargar_estatico_cache():
+        """Lee la cache del GTFS estático. Devuelve None si no existe, está corrupta o caducó."""
+        try:
+            with open(ARCHIVO_CACHE_GTFS, encoding='utf-8') as f:
+                datos = json.load(f)
+            edad_dias = (time.time() - datos['generado_ts']) / 86400
+            if edad_dias > GTFS_CACHE_DIAS or not datos.get('rutas') or not datos.get('paradas'):
+                logging.info(f"Cache GTFS caducada ({edad_dias:.1f} días); se renovará.")
+                return None
+            logging.info(f"Cache GTFS usada (generada hace {edad_dias:.1f} días).")
+            return datos
+        except FileNotFoundError:
+            logging.info("No hay cache GTFS; se descargará el estático.")
+        except Exception as e:
+            logging.warning(f"Cache GTFS ilegible ({e}); se descargará el estático.")
+        return None
+
+    def descargar_estatico(self, url_static: str) -> dict:
+        """Descarga el ZIP estático, extrae solo lo necesario y lo guarda como JSON compacto."""
+        t0 = time.monotonic()
+        zip_res = self.http.get(url_static, timeout=60)
+        zip_res.raise_for_status()
+        mapa_rutas, todas_paradas = {}, {}
+
+        with zipfile.ZipFile(io.BytesIO(zip_res.content)) as z:
+            with z.open('routes.txt') as f:
+                for fila in csv.DictReader(io.TextIOWrapper(f, 'utf-8-sig')):
+                    nombre_corto = fila.get('route_short_name', '').strip()
+                    mapa_rutas[fila['route_id']] = f"Línea {nombre_corto}" if nombre_corto else ""
+            with z.open('stops.txt') as f:
+                for fila in csv.DictReader(io.TextIOWrapper(f, 'utf-8-sig')):
+                    try:
+                        todas_paradas[fila['stop_id']] = {
+                            'nombre': fila.get('stop_name', 'Estación Desconocida').strip().rstrip('.'),
+                            'lat': round(float(fila['stop_lat']), 6),
+                            'lon': round(float(fila['stop_lon']), 6)
+                        }
+                    except (KeyError, ValueError):
+                        continue
+            ids_paradas_l1 = self._paradas_de_linea(z, mapa_rutas, MI_LINEA)
+
+        # Para nombrar hotspots solo se usan estaciones de TU línea (si no se pudo, todas)
+        paradas_l1 = [todas_paradas[s] for s in sorted(ids_paradas_l1) if s in todas_paradas]
+        if not paradas_l1:
+            logging.warning("No se pudieron identificar las paradas de L1; se usan todas las paradas.")
+
+        datos = {
+            'generado': datetime.datetime.now(ZONA_CDMX).isoformat(timespec='seconds'),
+            'generado_ts': int(time.time()),
+            'solo_l1': bool(paradas_l1),
+            'rutas': mapa_rutas,
+            'paradas': paradas_l1 or list(todas_paradas.values()),
+        }
+        try:
+            with open(ARCHIVO_CACHE_GTFS, 'w', encoding='utf-8') as f:
+                json.dump(datos, f, ensure_ascii=False, separators=(',', ':'))
+        except Exception as e:
+            logging.warning(f"No se pudo guardar la cache GTFS: {e}")
+
+        logging.info(f"⏱️ GTFS estático descargado y procesado en {time.monotonic() - t0:.1f}s "
+                     f"({len(datos['paradas'])} paradas{' de L1' if paradas_l1 else ''}).")
+        return datos
+
+    @staticmethod
     def _paradas_de_linea(z: zipfile.ZipFile, mapa_rutas: dict, linea: str) -> set:
         """stop_ids que recorre una línea, vía trips.txt + stop_times.txt (lectura en streaming)."""
         try:
@@ -321,37 +391,29 @@ class MetrobusMonitor:
             auth_res.raise_for_status()
             urls = auth_res.json()
 
-            zip_res = self.http.get(urls['urlStatic'], timeout=30)
-            zip_res.raise_for_status()
-            mapa_rutas, todas_paradas = {}, {}
-
-            with zipfile.ZipFile(io.BytesIO(zip_res.content)) as z:
-                with z.open('routes.txt') as f:
-                    for fila in csv.DictReader(io.TextIOWrapper(f, 'utf-8-sig')):
-                        nombre_corto = fila.get('route_short_name', '').strip()
-                        mapa_rutas[fila['route_id']] = f"Línea {nombre_corto}" if nombre_corto else ""
-                with z.open('stops.txt') as f:
-                    for fila in csv.DictReader(io.TextIOWrapper(f, 'utf-8-sig')):
-                        try:
-                            todas_paradas[fila['stop_id']] = {
-                                'nombre': fila.get('stop_name', 'Estación Desconocida').strip().rstrip('.'),
-                                'lat': float(fila['stop_lat']),
-                                'lon': float(fila['stop_lon'])
-                            }
-                        except (KeyError, ValueError):
-                            continue
-                ids_paradas_l1 = self._paradas_de_linea(z, mapa_rutas, MI_LINEA)
-
-            # Para nombrar hotspots solo se usan estaciones de TU línea (si no se pudo, todas)
-            paradas_l1 = [todas_paradas[s] for s in ids_paradas_l1 if s in todas_paradas]
-            mapa_paradas = paradas_l1 or list(todas_paradas.values())
-            if not paradas_l1:
-                logging.warning("No se pudieron identificar las paradas de L1; se usan todas las paradas.")
-
+            t0 = time.monotonic()
             rt_res = self.http.get(urls['urlRealTime'], timeout=30)
             rt_res.raise_for_status()
             feed = gtfs_realtime_pb2.FeedMessage()
             feed.ParseFromString(rt_res.content)
+            logging.info(f"⏱️ GTFS tiempo real descargado en {time.monotonic() - t0:.1f}s")
+
+            # GTFS estático: desde la cache local; solo se descarga si no hay, está vieja
+            # o el feed trae rutas que la cache no conoce (señal de que el GTFS cambió)
+            estatico = self.cargar_estatico_cache()
+            rutas_feed = {e.vehicle.trip.route_id for e in feed.entity
+                          if e.HasField("vehicle") and e.vehicle.HasField("trip")}
+            if estatico is not None:
+                desconocidas = rutas_feed - set(estatico['rutas'])
+                edad_h = (time.time() - estatico['generado_ts']) / 3600
+                if desconocidas and edad_h > GTFS_RECARGA_MIN_HORAS:
+                    logging.info(f"Rutas nuevas en el feed {sorted(desconocidas)[:5]}: se renueva la cache GTFS.")
+                    estatico = None
+            if estatico is None:
+                estatico = self.descargar_estatico(urls['urlStatic'])
+
+            mapa_rutas = estatico['rutas']
+            mapa_paradas = estatico['paradas']
 
             # Referencia de tiempo: la del feed si viene, si no la hora actual
             ahora_ref = feed.header.timestamp if feed.header.HasField("timestamp") else int(time.time())
@@ -528,6 +590,14 @@ class MetrobusMonitor:
             res = self.http.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": texto_plano}, timeout=15)
         res.raise_for_status()
 
+    @staticmethod
+    def _cronometrar(nombre, funcion):
+        t0 = time.monotonic()
+        try:
+            return funcion()
+        finally:
+            logging.info(f"⏱️ {nombre}: {time.monotonic() - t0:.1f}s")
+
     def enviar_reporte_completo(self):
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
             logging.error("Faltan credenciales de Telegram.")
@@ -538,9 +608,17 @@ class MetrobusMonitor:
             logging.info("🛑 Petición ignorada: Telegram envió un rebote duplicado (Filtro Antirrebote activado).")
             return
 
-        reporte_oficial = self.obtener_estado_oficial()
-        reporte_clima = self.obtener_clima()
-        reporte_asistente, reporte_termometro, reporte_hotspots = self.procesar_datos_gtfs()
+        # Las tres fuentes son independientes: se consultan en paralelo y el
+        # reporte tarda lo que la más lenta, no la suma de las tres
+        t0 = time.monotonic()
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            f_oficial = pool.submit(self._cronometrar, "SEMOVI", self.obtener_estado_oficial)
+            f_clima = pool.submit(self._cronometrar, "Clima", self.obtener_clima)
+            f_gtfs = pool.submit(self._cronometrar, "GPS", self.procesar_datos_gtfs)
+            reporte_oficial = f_oficial.result()
+            reporte_clima = f_clima.result()
+            reporte_asistente, reporte_termometro, reporte_hotspots = f_gtfs.result()
+        logging.info(f"⏱️ Consultas completas en {time.monotonic() - t0:.1f}s")
 
         self.guardar_registro_csv()
 
