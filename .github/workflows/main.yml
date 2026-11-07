@@ -45,6 +45,8 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action Bot"
           git add historial_metrobus.csv
+          # La cache del GTFS estático solo existe/cambia cuando se renueva
+          if [ -f gtfs_estatico.json ]; then git add gtfs_estatico.json; fi
           
           # Hacemos el commit
           git commit -m "📊 Actualiza historial de datos [skip ci]" || echo "No hay cambios para hacer commit"
