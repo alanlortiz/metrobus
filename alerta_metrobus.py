@@ -25,8 +25,13 @@ SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 USUARIO = os.getenv("USUARIO_API_KEY")
 SENHA = os.getenv("SENHA_API_KEY")
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+# Llegan desde el workflow_dispatch (Apps Script los manda según el comando de Telegram)
+SENTIDO = (os.getenv("SENTIDO") or "auto").strip().lower()   # auto | ida | regreso
+ORIGEN = (os.getenv("ORIGEN") or "manual").strip().lower()    # manual | programado
 
 ZONA_CDMX = ZoneInfo("America/Mexico_City")
+# Antes de esta hora (y desde medianoche) la L1 prácticamente no opera
+INICIO_SERVICIO = (4, 30)
 MI_LINEA = "Línea 1"
 
 # Posiciones GPS más viejas que esto se descartan (buses apagados / en patio)
@@ -96,10 +101,21 @@ class MetrobusMonitor:
 
         tiempo_cdmx = datetime.datetime.now(ZONA_CDMX)
         self.tiempo_cdmx = tiempo_cdmx
+
+        # Turno: /ida y /regreso mandan; si no, se decide por la hora
+        self.sentido_forzado = SENTIDO if SENTIDO in ("ida", "regreso") else None
+        if self.sentido_forzado:
+            turno = "Mañana" if self.sentido_forzado == "ida" else "Tarde"
+        elif (tiempo_cdmx.hour, tiempo_cdmx.minute) < INICIO_SERVICIO:
+            turno = "Noche"
+        else:
+            turno = "Mañana" if tiempo_cdmx.hour < 12 else "Tarde"
+        logging.info(f"Origen: {ORIGEN} | sentido solicitado: {SENTIDO} | turno: {turno}")
+
         self.datos_historicos = {
             "Fecha": tiempo_cdmx.strftime("%Y-%m-%d"),
             "Hora": tiempo_cdmx.strftime("%H:%M"),
-            "Turno": "Mañana" if tiempo_cdmx.hour < 12 else "Tarde",
+            "Turno": turno,
             "Falla_Oficial": 0,
             "Lluvia": 0,
             "ETA_Minutos": 0,
@@ -453,6 +469,11 @@ class MetrobusMonitor:
         if not USUARIO or not SENHA:
             return "", "", ""
 
+        if self.datos_historicos["Turno"] == "Noche":
+            return ("🌙 <b>Fuera del horario de servicio</b>\n"
+                    "La L1 opera aprox. de 4:30 a 24:00. Si aun así quieres ver el GPS, usa /ida o /regreso.",
+                    "", "")
+
         try:
             url_auth = "https://metrobus-gtfs.sinopticoplus.com/gtfs-api/partnerValidation"
             auth_res = self.http.post(url_auth, json={"usuario": USUARIO, "senha": SENHA}, timeout=15)
@@ -598,7 +619,8 @@ class MetrobusMonitor:
                     buses_utiles.append((distancia, b))
             buses_utiles.sort(key=lambda x: x[0])
 
-            titulo_asis = f"🎯 <b>ASISTENTE PERSONAL (GPS)</b>\n<i>Tu viaje: {esc(estacion)} ➔ {esc(destino)}</i>\n"
+            forzado = f" (por /{self.sentido_forzado})" if self.sentido_forzado else ""
+            titulo_asis = f"🎯 <b>ASISTENTE PERSONAL (GPS)</b>\n<i>Tu viaje: {esc(estacion)} ➔ {esc(destino)}{forzado}</i>\n"
             self.datos_historicos["Unidades_Cercanas"] = len(buses_utiles)
 
             if es_manana:
