@@ -32,7 +32,10 @@ jobs:
       - name: Descargar código
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0 
+          # Siempre la versión más reciente de main (no la del momento del disparo):
+          # un run que esperó en fila ve el historial que guardó el run anterior
+          ref: main
+          fetch-depth: 0
 
       - name: Configurar Python
         uses: actions/setup-python@v6
@@ -63,10 +66,23 @@ jobs:
           git add historial_metrobus.csv
           # La cache del GTFS estático solo existe/cambia cuando se renueva
           if [ -f gtfs_estatico.json ]; then git add gtfs_estatico.json; fi
-          
-          # Hacemos el commit
-          git commit -m "📊 Actualiza historial de datos [skip ci]" || echo "No hay cambios para hacer commit"
-          
-          # 🛡️ BLINDAJE DE GIT: Descarga y fusiona cambios de último milisegundo antes de empujar
-          git pull --rebase origin main
-          git push
+
+          if git diff --cached --quiet; then
+            echo "No hay cambios para hacer commit"
+            exit 0
+          fi
+          git commit -m "📊 Actualiza historial de datos [skip ci]"
+
+          # 🛡️ Hasta 3 intentos por si otro run (o tú) subió algo mientras tanto.
+          # El CSV se combina solo (.gitattributes merge=union); en la cache GTFS gana la nuestra.
+          for intento in 1 2 3; do
+            if git pull --rebase -X theirs origin main && git push origin HEAD:main; then
+              echo "Historial guardado (intento $intento)"
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            echo "Intento $intento falló; reintentando..."
+            sleep $((intento * 3))
+          done
+          echo "::error::No se pudo guardar el historial tras 3 intentos (el reporte de Telegram sí se envió)"
+          exit 1
