@@ -125,41 +125,6 @@ class MetrobusMonitor:
             "Hotspots_L1": 0
         }
 
-    # ESCUDO ANTIRREBOTE
-    def ejecucion_reciente(self) -> bool:
-        """Verifica si el script ya envió un reporte en los últimos 3 minutos"""
-        nombre_archivo = "historial_metrobus.csv"
-        if not os.path.isfile(nombre_archivo):
-            return False
-
-        try:
-            with open(nombre_archivo, mode='r', encoding='utf-8') as archivo:
-                filas = list(csv.DictReader(archivo))
-                if not filas:
-                    return False
-
-                ultima_fila = filas[-1]
-                fecha_str = ultima_fila.get("Fecha")
-                hora_str = ultima_fila.get("Hora")
-
-                if not fecha_str or not hora_str:
-                    return False
-
-                ultima_ejecucion = datetime.datetime.strptime(
-                    f"{fecha_str} {hora_str}", "%Y-%m-%d %H:%M"
-                ).replace(tzinfo=ZONA_CDMX)
-
-                minutos_diferencia = (self.tiempo_cdmx - ultima_ejecucion).total_seconds() / 60.0
-
-                # Si han pasado menos de 3 minutos, es un rebote de Telegram
-                if 0 <= minutos_diferencia < 3.0:
-                    return True
-
-        except Exception as e:
-            logging.error(f"Error comprobando historial antirrebote: {e}")
-
-        return False
-
     @staticmethod
     def calcular_distancia(lat1, lon1, lat2, lon2):
         R = 6371.0
@@ -715,10 +680,8 @@ class MetrobusMonitor:
             logging.error("Faltan credenciales de Telegram.")
             sys.exit(1)
 
-        # ACTIVACIÓN DEL ESCUDO ANTIRREBOTE
-        if self.ejecucion_reciente():
-            logging.info("🛑 Petición ignorada: Telegram envió un rebote duplicado (Filtro Antirrebote activado).")
-            return
+        # Ya no hay escudo antirrebote aquí: los reintentos de Telegram se resolvieron
+        # de raíz en el Apps Script (HtmlService + deduplicación por update_id).
 
         # Las tres fuentes son independientes: se consultan en paralelo y el
         # reporte tarda lo que la más lenta, no la suma de las tres
