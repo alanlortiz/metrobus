@@ -15,9 +15,11 @@ on:
         default: 'manual'
         type: string
 
+# Los runs se forman en fila en vez de cancelarse: /ida seguido de /regreso entrega los dos.
+# (Se ejecutan uno tras otro para que no choquen al subir el historial al repo.)
 concurrency:
   group: metrobus-bot
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run-script:
