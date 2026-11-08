@@ -1,0 +1,3 @@
+# El historial solo crece (se agregan filas al final). Si dos ejecuciones agregan
+# una fila al mismo tiempo, git conserva AMBAS en lugar de marcar conflicto.
+historial_metrobus.csv merge=union
