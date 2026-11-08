@@ -1,7 +1,19 @@
 name: Monitor Metrobus CDMX
 
 on:
-  workflow_dispatch: 
+  workflow_dispatch:
+    inputs:
+      sentido:
+        description: 'Sentido del viaje'
+        required: false
+        default: 'auto'
+        type: choice
+        options: [auto, ida, regreso]
+      origen:
+        description: 'Quién lo disparó (manual o programado)'
+        required: false
+        default: 'manual'
+        type: string
 
 concurrency:
   group: metrobus-bot
@@ -38,6 +50,8 @@ jobs:
           USUARIO_API_KEY: ${{ secrets.USUARIO_API_KEY }}
           SENHA_API_KEY: ${{ secrets.SENHA_API_KEY }}
           OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+          SENTIDO: ${{ inputs.sentido }}
+          ORIGEN: ${{ inputs.origen }}
         run: python alerta_metrobus.py
 
       - name: Guardar Historial en Repositorio
